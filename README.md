@@ -1,85 +1,89 @@
 # mcp
 
-MCP server that combines PostgreSQL tools and Swagger/OpenAPI tools.
+MCP server combining PostgreSQL tools and Swagger/OpenAPI tools.
 
-Swagger group also includes `call_api_by_swagger`, which executes real HTTP requests using path/method from the loaded spec.
+The Swagger side is designed as an execution layer for another agent:
+- auth is managed inside MCP memory
+- operation tools are generated from Swagger `operationId`
+- consumers do not pass `Authorization` headers, API paths, or HTTP methods
 
-## `call_api_by_swagger` examples
+## Swagger tool behavior
 
-Use these as ready payloads for MCP tool calls.
+Registered core Swagger tools:
+- `auth_login` - stores token in MCP session memory
+- `auth_logout` - clears stored token
+- `auth_status` - shows auth session state
+- `call_api_by_swagger` - low-level operationId caller with internal auth header injection
+- `get_profile_page` - high-level profile page wrapper
+- `get_translations` - high-level translations wrapper
+- `update_profile` - high-level profile update wrapper
+- `list_api_endpoints`
+- `get_endpoint`
+- `get_schema`
+- `find_endpoint_by_keyword`
 
-### GET with `pathParams` and `query`
+Additionally, MCP generates one tool per Swagger operation:
+- tool name pattern: `api_<operation_id_normalized>`
+- fallback when `operationId` is missing: `api_<method>_<path>`
+- input shape for generated tools:
+  - `pathParams` (optional)
+  - `query` (optional)
+  - `body` (optional)
 
-```json
-{
-  "path": "/users/{id}",
-  "method": "get",
-  "pathParams": {
-	"id": 42
-  },
-  "query": {
-	"include": "roles",
-	"verbose": true
-  }
-}
-```
+Example generated tools:
+- `api_get_profile`
+- `api_update_profile`
+- `api_get_translations`
 
-### POST with JSON `body` and custom header
+Wrapper mapping order is deterministic:
+- fixed table `tool_name -> operationId`
+- startup validation fails fast if mapped `operationId` is absent in Swagger
 
-```json
-{
-  "path": "/orders",
-  "method": "post",
-  "headers": {
-	"x-request-id": "demo-req-001"
-  },
-  "body": {
-	"customerId": 123,
-	"items": [
-	  {
-		"sku": "A-100",
-		"qty": 2
-	  }
-	]
-  }
-}
-```
+## Authentication flow
 
-### Override `baseUrl`
+Preferred usage:
+1. Call `auth_login` once (or configure env credentials for auto-login).
+2. Call wrapper tools or `api_*` tools mapped by Swagger `operationId`.
 
-```json
-{
-  "path": "/health",
-  "method": "get",
-  "baseUrl": "https://staging.api.example.com"
-}
-```
-
-Notes:
-- `baseUrl` priority: explicit `baseUrl` -> first Swagger `servers[0].url` -> origin of `SWAGGER_URL`.
-- If Swagger marks a query/path param as required, tool returns an error when it is missing.
-- If Swagger marks `requestBody` as required, pass `body`.
-- If `body` is provided and no `content-type` header is set, tool uses `application/json`.
+MCP handles:
+- token storage in process memory
+- automatic `Authorization` header injection
+- clear unauthorized errors: `Unauthorized: call auth_login first`
 
 ## Environment
 
-- Create `.env` from defaults in repository root.
+- Create `.env` in repository root.
 - SQL tools require: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`.
 - Swagger tools require: `SWAGGER_URL`.
-- If required variables are missing, corresponding tools are not registered.
-- `tool_status` is always available and returns compact diagnostics: group readiness and per-tool `registered: true/false`.
+
+Auth/API controls:
+- `AUTH_LOGIN_PATH` (default: `/api/v1/login`)
+- `AUTH_LOGIN_METHOD` (default: `post`)
+- `AUTH_USERNAME_FIELD` (default: `username`)
+- `AUTH_PASSWORD_FIELD` (default: `password`)
+- `AUTH_TOKEN_FIELD_PATH` (default: `content.accessToken`)
+- `AUTH_TOKEN_TYPE_FIELD_PATH` (default: `content.tokenType`)
+- `AUTH_DEFAULT_TOKEN_TYPE` (default: `Bearer`)
+- `AUTH_TOKEN` (optional pre-seeded static token)
+- `AUTH_USERNAME` / `AUTH_PASSWORD` (optional for auto-login)
+- `AUTH_AUTO_LOGIN` (default: `true`)
+- `API_REQUEST_TIMEOUT_MS` (default: `15000`)
+- `API_RETRY_ON_UNAUTHORIZED` (default: `true`)
+
+If required variables are missing, corresponding tool groups are not registered.
+`tool_status` is always available.
 
 ## Structure
 
-- `index.js` - bootstrap and wiring only.
+- `index.js` - bootstrap and wiring.
 - `src/config/env.js` - environment config parsing.
 - `src/infrastructure/db/client.js` - PostgreSQL client factory.
+- `src/services/auth/auth-session.js` - auth session and token management.
 - `src/services/swagger/swagger-cache.js` - Swagger loading and cache.
-- `src/tools/register-sql-tools.js` - SQL related MCP tools.
-- `src/tools/register-swagger-tools.js` - Swagger related MCP tools.
+- `src/tools/register-sql-tools.js` - SQL MCP tools.
+- `src/tools/register-swagger-tools.js` - auth and generated Swagger operation tools.
 - `src/tools/register-health-tool.js` - combined health check tool.
-- `src/tools/register-status-tool.js` - tool availability and env diagnostics.
-- `src/utils/errors.js` - shared error helpers.
+- `src/tools/register-status-tool.js` - tool availability diagnostics.
 
 ## Run
 
@@ -93,4 +97,3 @@ npm start
 ```bash
 npm run check
 ```
-

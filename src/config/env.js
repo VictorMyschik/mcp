@@ -3,6 +3,22 @@ function toPort(value, fallback) {
     return Number.isFinite(port) ? port : fallback;
 }
 
+function toBoolean(value, fallback) {
+    if (value === undefined || value === null || String(value).trim() === "") {
+        return fallback;
+    }
+
+    const normalized = String(value).trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+        return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+        return false;
+    }
+
+    return fallback;
+}
+
 const REQUIRED_ENV_BY_TOOL = {
     sql: ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"],
     swagger: ["SWAGGER_URL"]
@@ -28,6 +44,23 @@ export function getConfigFromEnv(env = process.env) {
             database: env.DB_NAME
         },
         swaggerUrl: env.SWAGGER_URL,
+        api: {
+            requestTimeoutMs: Math.max(1000, Number(env.API_REQUEST_TIMEOUT_MS || 15000)),
+            retryOnUnauthorized: toBoolean(env.API_RETRY_ON_UNAUTHORIZED, true)
+        },
+        auth: {
+            loginPath: String(env.AUTH_LOGIN_PATH || "/api/v1/login").trim(),
+            loginMethod: String(env.AUTH_LOGIN_METHOD || "post").trim().toLowerCase(),
+            usernameField: String(env.AUTH_USERNAME_FIELD || "username").trim(),
+            passwordField: String(env.AUTH_PASSWORD_FIELD || "password").trim(),
+            tokenFieldPath: String(env.AUTH_TOKEN_FIELD_PATH || "content.accessToken").trim(),
+            tokenTypeFieldPath: String(env.AUTH_TOKEN_TYPE_FIELD_PATH || "content.tokenType").trim(),
+            defaultTokenType: String(env.AUTH_DEFAULT_TOKEN_TYPE || "Bearer").trim(),
+            staticToken: String(env.AUTH_TOKEN || "").trim(),
+            username: String(env.AUTH_USERNAME || "").trim(),
+            password: String(env.AUTH_PASSWORD || "").trim(),
+            autoLogin: toBoolean(env.AUTH_AUTO_LOGIN, true)
+        },
         tools: {
             sql: {
                 enabled: sqlMissingVars.length === 0,

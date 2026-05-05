@@ -16,7 +16,8 @@ export function registerStatusTool(server, {toolAvailability, registeredToolName
                         groupName,
                         {
                             enabled: state.enabled,
-                            missingEnvVars: [...(state.missingEnvVars || [])].sort()
+                            missingEnvVars: [...(state.missingEnvVars || [])].sort(),
+                            runtimeError: state.runtimeError || null
                         }
                     ];
                 })
