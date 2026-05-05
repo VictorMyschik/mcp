@@ -1,9 +1,13 @@
 import {getErrorMessage} from "../utils/errors.js";
+import {asToolResult} from "./tool-result.js";
 
 export function registerHealthTool(server, {dbClient, swaggerService}) {
-    server.tool(
+    server.registerTool(
         "health",
-        {},
+        {
+            description: "Check DB and Swagger availability and return service health.",
+            inputSchema: {}
+        },
         async () => {
             const health = {
                 status: "ok",
@@ -37,8 +41,7 @@ export function registerHealthTool(server, {dbClient, swaggerService}) {
                 health.swagger.reason = "disabled_missing_env";
             }
 
-            return health;
+            return asToolResult(health);
         }
     );
 }
-
