@@ -27,9 +27,10 @@ export function toBrowserErrorPayload(error, {debug, fallbackUrl} = {}) {
         message: normalizedError.message
     };
 
-    const url = normalizedError.details?.url || fallbackUrl || null;
-    if (url) {
-        errorPayload.url = url;
+    const finalUrl = normalizedError.details?.finalUrl || normalizedError.details?.url || fallbackUrl || null;
+    if (finalUrl) {
+        errorPayload.url = finalUrl;
+        errorPayload.finalUrl = finalUrl;
     }
 
     if (normalizedError.details?.meta && typeof normalizedError.details.meta === "object") {
@@ -39,6 +40,9 @@ export function toBrowserErrorPayload(error, {debug, fallbackUrl} = {}) {
     return {
         ok: false,
         error: errorPayload,
+        ...(finalUrl ? {finalUrl} : {}),
+        ...(debug?.screenshot ? {debugScreenshotPath: debug.screenshot} : {}),
+        ...(debug?.html ? {debugHtmlPath: debug.html} : {}),
         ...(debug ? {debug} : {})
     };
 }

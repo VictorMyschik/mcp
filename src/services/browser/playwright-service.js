@@ -131,6 +131,22 @@ function compareNumbers(left, operator, right) {
     }
 }
 
+function resolveOptionalObjectPreset(value, defaults = {}) {
+    if (value === true) {
+        return {...defaults};
+    }
+
+    if (value && typeof value === "object") {
+        return {...defaults, ...value};
+    }
+
+    return null;
+}
+
+function pushFailedAssertion(failedAssertions, assertion) {
+    failedAssertions.push(assertion);
+}
+
 async function waitForLocator(page, selector, timeoutMs, state = "attached") {
     const locator = page.locator(selector).first();
 
@@ -168,6 +184,13 @@ function toRect(rect) {
 }
 
 export function createPlaywrightService() {
+    async function getViewportMetrics(session) {
+        return session.page.evaluate(() => ({
+            width: window.innerWidth,
+            height: window.innerHeight
+        }));
+    }
+
     async function navigate({session, url, waitUntil = "domcontentloaded"}) {
         ensureWaitUntil(waitUntil);
 
@@ -508,17 +531,20 @@ export function createPlaywrightService() {
         };
     }
 
-    async function assertLayout({session, selector, assertions, timeoutMs}) {
+    async function assertLayout({session, selector, assertions, presets, timeoutMs}) {
         const normalizedAssertions = assertions && typeof assertions === "object"
             ? Object.entries(assertions).filter(([, value]) => value !== undefined && value !== null)
             : [];
+        const normalizedPresets = presets && typeof presets === "object" ? presets : {};
 
-        if (normalizedAssertions.length === 0) {
-            throw browserError("INVALID_LAYOUT_ASSERTIONS", "Provide at least one browser_assert_layout assertion.");
+        if (normalizedAssertions.length === 0 && Object.keys(normalizedPresets).length === 0) {
+            throw browserError("INVALID_LAYOUT_ASSERTIONS", "Provide at least one browser_assert_layout assertion or preset.");
         }
 
         const {rect} = await getBoundingRect({session, selector, timeoutMs});
         const failedAssertions = [];
+        const presetResults = [];
+        const relatedRects = {};
 
         for (const [assertionName, expected] of normalizedAssertions) {
             const spec = LAYOUT_ASSERTION_SPECS[assertionName];
@@ -531,12 +557,90 @@ export function createPlaywrightService() {
             const actual = rect[spec.field];
             const passed = compareNumbers(actual, spec.operator, Number(expected));
             if (!passed) {
-                failedAssertions.push({
+                pushFailedAssertion(failedAssertions, {
                     name: assertionName,
                     expected,
                     actual,
                     operator: spec.operator,
                     field: spec.field
+                });
+            }
+        }
+
+        const nearTopPreset = resolveOptionalObjectPreset(normalizedPresets.nearTop, {maxTop: 80});
+        if (nearTopPreset) {
+            const checks = [];
+            if (nearTopPreset.maxTop !== undefined) {
+                checks.push({field: "top", operator: "<=", expected: Number(nearTopPreset.maxTop), actual: rect.top, name: "nearTop.maxTop"});
+            }
+            if (nearTopPreset.minTop !== undefined) {
+                checks.push({field: "top", operator: ">=", expected: Number(nearTopPreset.minTop), actual: rect.top, name: "nearTop.minTop"});
+            }
+
+            const presetPassed = checks.every((check) => compareNumbers(check.actual, check.operator, check.expected));
+            presetResults.push({name: "nearTop", passed: presetPassed, config: nearTopPreset});
+
+            for (const check of checks) {
+                if (!compareNumbers(check.actual, check.operator, check.expected)) {
+                    pushFailedAssertion(failedAssertions, check);
+                }
+            }
+        }
+
+        const withinViewportPreset = resolveOptionalObjectPreset(normalizedPresets.withinViewport, {padding: 0});
+        let viewport = null;
+        if (withinViewportPreset) {
+            viewport = await getViewportMetrics(session);
+            const padding = Number(withinViewportPreset.padding || 0);
+            const checks = [
+                {name: "withinViewport.top", field: "top", operator: ">=", expected: padding, actual: rect.top},
+                {name: "withinViewport.left", field: "left", operator: ">=", expected: padding, actual: rect.left},
+                {name: "withinViewport.right", field: "right", operator: "<=", expected: viewport.width - padding, actual: rect.right},
+                {name: "withinViewport.bottom", field: "bottom", operator: "<=", expected: viewport.height - padding, actual: rect.bottom}
+            ];
+            const presetPassed = checks.every((check) => compareNumbers(check.actual, check.operator, check.expected));
+            presetResults.push({name: "withinViewport", passed: presetPassed, config: withinViewportPreset});
+
+            for (const check of checks) {
+                if (!compareNumbers(check.actual, check.operator, check.expected)) {
+                    pushFailedAssertion(failedAssertions, check);
+                }
+            }
+        }
+
+        const sidebarPreset = normalizedPresets.sidebarDoesNotPushContentDown;
+        if (sidebarPreset && typeof sidebarPreset === "object") {
+            const sidebarSelector = String(sidebarPreset.sidebarSelector || "").trim();
+            if (!sidebarSelector) {
+                throw browserError("INVALID_LAYOUT_PRESET", "sidebarDoesNotPushContentDown requires sidebarSelector.");
+            }
+
+            const sidebarRectPayload = await getBoundingRect({session, selector: sidebarSelector, timeoutMs});
+            relatedRects.sidebar = {
+                selector: sidebarSelector,
+                rect: sidebarRectPayload.rect
+            };
+            const maxTopDifference = Number(sidebarPreset.maxTopDifference ?? 24);
+            const expected = sidebarRectPayload.rect.top + maxTopDifference;
+            const presetPassed = rect.top <= expected;
+            presetResults.push({
+                name: "sidebarDoesNotPushContentDown",
+                passed: presetPassed,
+                config: {
+                    sidebarSelector,
+                    maxTopDifference
+                }
+            });
+
+            if (!presetPassed) {
+                pushFailedAssertion(failedAssertions, {
+                    name: "sidebarDoesNotPushContentDown",
+                    field: "top",
+                    operator: "<=",
+                    expected,
+                    actual: rect.top,
+                    relatedSelector: sidebarSelector,
+                    relatedActual: sidebarRectPayload.rect.top
                 });
             }
         }
@@ -547,6 +651,9 @@ export function createPlaywrightService() {
             selector,
             passed: failedAssertions.length === 0,
             actual: rect,
+            viewport,
+            presetResults,
+            relatedRects,
             failedAssertions
         };
     }

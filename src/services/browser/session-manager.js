@@ -16,6 +16,19 @@ const DEVICE_PRESETS = {
     "iPhone 14 Pro Max": devices["iPhone 14 Pro Max"]
 };
 
+const DEV_CONSOLE_NOISE_PATTERNS = [
+    /^\[vite\]/i,
+    /vite connected/i,
+    /vite connecting/i,
+    /download the react devtools/i,
+    /install the vue devtools/i,
+    /lit is in dev mode/i,
+    /react router future flag warning/i
+];
+
+const CONSOLE_WARNING_TYPES = new Set(["warn", "warning"]);
+const CONSOLE_ERROR_TYPES = new Set(["error", "pageerror"]);
+
 function limitSize(list, maxSize) {
     if (list.length > maxSize) {
         list.splice(0, list.length - maxSize);
@@ -68,6 +81,34 @@ function normalizeNetworkError(record) {
         resourceType: record.resourceType,
         errorText: record.errorText ?? null,
         timestamp: new Date().toISOString()
+    };
+}
+
+function isIgnoredConsoleNoise(entry) {
+    if (!entry?.text) {
+        return false;
+    }
+
+    if (CONSOLE_ERROR_TYPES.has(entry.type)) {
+        return false;
+    }
+
+    return DEV_CONSOLE_NOISE_PATTERNS.some((pattern) => pattern.test(entry.text));
+}
+
+function isIgnoredNetworkNoise(entry) {
+    const errorText = String(entry?.errorText || "").toLowerCase();
+    return errorText.includes("net::err_aborted");
+}
+
+function buildDiagnosticsSnapshot(session) {
+    const consoleLogs = [...session.consoleLogs];
+    return {
+        consoleLogs,
+        consoleErrors: consoleLogs.filter((entry) => CONSOLE_ERROR_TYPES.has(entry.type)),
+        consoleWarnings: consoleLogs.filter((entry) => CONSOLE_WARNING_TYPES.has(entry.type)),
+        networkErrors: [...session.networkErrors],
+        ignoredNoiseCount: Number(session.ignoredNoiseCount || 0)
     };
 }
 
@@ -126,7 +167,13 @@ export function createBrowserSessionManager({
         const {page} = session;
 
         page.on("console", (message) => {
-            session.consoleLogs.push(toSerializableConsoleMessage(message));
+            const entry = toSerializableConsoleMessage(message);
+            if (isIgnoredConsoleNoise(entry)) {
+                session.ignoredNoiseCount += 1;
+                return;
+            }
+
+            session.consoleLogs.push(entry);
             limitSize(session.consoleLogs, maxConsoleEntries);
         });
 
@@ -141,12 +188,19 @@ export function createBrowserSessionManager({
         });
 
         page.on("requestfailed", (request) => {
-            session.networkErrors.push(normalizeNetworkError({
+            const entry = normalizeNetworkError({
                 url: request.url(),
                 method: request.method(),
                 resourceType: request.resourceType(),
                 errorText: request.failure()?.errorText || "Request failed"
-            }));
+            });
+
+            if (isIgnoredNetworkNoise(entry)) {
+                session.ignoredNoiseCount += 1;
+                return;
+            }
+
+            session.networkErrors.push(entry);
             limitSize(session.networkErrors, maxNetworkErrors);
         });
 
@@ -194,7 +248,8 @@ export function createBrowserSessionManager({
             crashed: false,
             pageClosed: false,
             consoleLogs: [],
-            networkErrors: []
+            networkErrors: [],
+            ignoredNoiseCount: 0
         };
 
         attachObservers(session);
@@ -226,6 +281,10 @@ export function createBrowserSessionManager({
         }
 
         return touch(session);
+    }
+
+    function getDiagnostics(sessionId) {
+        return buildDiagnosticsSnapshot(getSession(sessionId));
     }
 
     async function closeSession(sessionId) {
@@ -276,6 +335,7 @@ export function createBrowserSessionManager({
         closeSession,
         closeAll,
         listSessions,
+        getDiagnostics,
         supportedDevices: SUPPORTED_BROWSER_DEVICES
     };
 }

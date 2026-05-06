@@ -20,6 +20,10 @@ Registered browser tools:
 - `browser_close_session`
 - `browser_navigate`
 - `browser_auth_from_api_login`
+- `browser_open_profile_page`
+- `browser_open_account_home`
+- `browser_open_security_page`
+- `browser_capture_profile_mobile`
 - `browser_wait_for`
 - `browser_click`
 - `browser_fill`
@@ -45,6 +49,42 @@ Preferred frontend authentication flow:
 3. Navigate directly to the target authenticated route.
 
 This avoids brittle UI-login dependencies and keeps browser automation stable.
+
+Supported auth modes in high-level browser tools:
+- `apiLogin` - perform API login and hydrate frontend auth state into `localStorage`
+- `useExistingMcpAuth` - reuse an already authenticated MCP auth session (for example after `auth_login`)
+- `none` - skip auth hydration entirely
+
+Auth hardening notes:
+- `browser_auth_from_api_login` and `browser_inspect_page` now return structured auth failures:
+  - `AUTH_API_LOGIN_FAILED`
+  - `AUTH_REDIRECTED_TO_LOGIN`
+  - `AUTH_SESSION_EXPIRED`
+- when a valid shared MCP auth session exists, browser auth can fall back to `useExistingMcpAuth`
+- auth error payloads include:
+  - `finalUrl`
+  - `debugScreenshotPath`
+  - `debugHtmlPath`
+
+### Browser diagnostics
+
+Browser diagnostics are intentionally split to reduce noise:
+- `consoleErrors` - actual console errors and page errors
+- `consoleWarnings` - warnings that survived filtering
+- `networkErrors` - failed requests and HTTP 4xx/5xx responses
+- `ignoredNoiseCount` - filtered Vite/dev noise or harmless `net::ERR_ABORTED` requests
+
+Backward-compatible fields are still returned where practical:
+- `browser_get_console_logs` still returns `logs`
+- `browser_get_network_errors` still returns `requests`
+
+Interpretation guidelines:
+- non-zero `ignoredNoiseCount` is expected in dev-mode frontends
+- investigate `consoleErrors` first, then `networkErrors`
+- `consoleWarnings` are useful for regressions, but not all warnings are fatal
+- filtered noise should not hide real app errors: only known Vite/dev chatter and harmless aborted requests are ignored
+
+Artifacts are written under `artifacts/browser/<sessionId>/...`.
 
 ## Swagger tool behavior
 
@@ -182,6 +222,31 @@ npm run smoke:browser
 }
 ```
 
+### Open profile page with existing MCP auth
+
+```json
+{
+  "baseUrl": "http://outvento.test",
+  "auth": {
+    "mode": "useExistingMcpAuth"
+  }
+}
+```
+
+### Open security page in a dedicated session
+
+```json
+{
+  "baseUrl": "http://outvento.test",
+  "device": "Desktop Chrome",
+  "auth": {
+    "mode": "apiLogin",
+    "login": "user@example.com",
+    "password": "secret"
+  }
+}
+```
+
 ### Navigate and inspect
 
 ```json
@@ -297,30 +362,60 @@ npm run smoke:browser
 }
 ```
 
+### Mobile profile capture
+
+```json
+{
+  "baseUrl": "http://outvento.test",
+  "headless": true,
+  "auth": {
+    "mode": "useExistingMcpAuth"
+  }
+}
+```
+
+## Example smoke flow
+
+Short end-to-end browser smoke flow:
+1. `auth_login` (optional but recommended when `useExistingMcpAuth` is used)
+2. `browser_open_profile_page`
+3. `browser_assert_layout`
+4. `browser_get_console_logs`
+5. `browser_get_network_errors`
+6. `browser_open_security_page` or `browser_open_account_home`
+7. `browser_capture_profile_mobile`
+8. `browser_close_session`
+
 ## Browser smoke scenario
 
 The included smoke harness starts a local mock frontend/API and validates this flow:
 
 1. `browser_open_session`
 2. `browser_auth_from_api_login`
-3. `browser_navigate`
-4. `browser_wait_for`
-5. `browser_fill`
-6. `browser_click`
-7. `browser_press`
-8. `browser_evaluate`
-9. `browser_get_text`
-10. `browser_get_attribute`
-11. `browser_assert_layout`
-12. `browser_save_storage_state`
-13. `browser_load_storage_state`
-14. `browser_screenshot` (full page)
-15. `browser_screenshot` (element)
-16. `browser_get_bounding_rect`
-17. `browser_get_computed_styles`
-18. `browser_get_console_logs`
-19. `browser_get_network_errors`
-20. `browser_close_session`
+3. `browser_open_profile_page`
+4. `browser_open_account_home`
+5. `browser_open_security_page`
+6. `browser_capture_profile_mobile`
+7. `browser_navigate`
+8. `browser_wait_for`
+9. `browser_fill`
+10. `browser_click`
+11. `browser_press`
+12. `browser_evaluate`
+13. `browser_get_text`
+14. `browser_get_attribute`
+15. `browser_assert_layout`
+16. `browser_save_storage_state`
+17. `browser_load_storage_state`
+18. `browser_screenshot` (full page)
+19. `browser_screenshot` (element)
+20. `browser_get_bounding_rect`
+21. `browser_get_computed_styles`
+22. `browser_get_console_logs`
+23. `browser_get_network_errors`
+24. `browser_inspect_page`
+25. auth failure coverage for `AUTH_API_LOGIN_FAILED`, `AUTH_REDIRECTED_TO_LOGIN`, `AUTH_SESSION_EXPIRED`
+26. `browser_close_session`
 
 Artifacts are written under `artifacts/browser/<sessionId>/...` and are intentionally ignored by Git.
 

@@ -19,7 +19,7 @@ const server = new McpServer({
 const toolsByGroup = {
     sql: ["run_sql", "list_tables"],
     swagger: ["list_api_endpoints", "get_endpoint", "get_schema", "find_endpoint_by_keyword", "call_api_by_swagger", "auth_login", "auth_logout", "auth_status", "get_profile_page", "get_translations", "update_profile"],
-    browser: ["browser_open_session", "browser_close_session", "browser_navigate", "browser_auth_from_api_login", "browser_wait_for", "browser_click", "browser_fill", "browser_press", "browser_evaluate", "browser_get_text", "browser_get_attribute", "browser_screenshot", "browser_get_bounding_rect", "browser_get_computed_styles", "browser_assert_layout", "browser_save_storage_state", "browser_load_storage_state", "browser_get_console_logs", "browser_get_network_errors", "browser_inspect_page"]
+    browser: ["browser_open_session", "browser_close_session", "browser_navigate", "browser_auth_from_api_login", "browser_open_profile_page", "browser_open_account_home", "browser_open_security_page", "browser_capture_profile_mobile", "browser_wait_for", "browser_click", "browser_fill", "browser_press", "browser_evaluate", "browser_get_text", "browser_get_attribute", "browser_screenshot", "browser_get_bounding_rect", "browser_get_computed_styles", "browser_assert_layout", "browser_save_storage_state", "browser_load_storage_state", "browser_get_console_logs", "browser_get_network_errors", "browser_inspect_page"]
 };
 
 let dbClient = null;

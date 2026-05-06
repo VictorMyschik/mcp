@@ -32,6 +32,81 @@ async function safelyCaptureDebugArtifacts({artifactService, sessionManager, ses
     return artifactService.captureDebugArtifacts(session, {label});
 }
 
+const viewportInputSchema = z.object({
+    width: z.number().int().positive(),
+    height: z.number().int().positive()
+});
+
+const authInputSchema = z.object({
+    mode: z.enum(["apiLogin", "useExistingMcpAuth", "none"]),
+    login: z.string().min(1).optional(),
+    password: z.string().min(1).optional(),
+    storageKey: z.string().min(1).optional()
+});
+
+const layoutAssertionsSchema = z.object({
+    topLessThanOrEqual: z.number().optional(),
+    topLessThan: z.number().optional(),
+    topGreaterThanOrEqual: z.number().optional(),
+    topGreaterThan: z.number().optional(),
+    leftLessThanOrEqual: z.number().optional(),
+    leftLessThan: z.number().optional(),
+    leftGreaterThanOrEqual: z.number().optional(),
+    leftGreaterThan: z.number().optional(),
+    rightLessThanOrEqual: z.number().optional(),
+    rightLessThan: z.number().optional(),
+    rightGreaterThanOrEqual: z.number().optional(),
+    rightGreaterThan: z.number().optional(),
+    bottomLessThanOrEqual: z.number().optional(),
+    bottomLessThan: z.number().optional(),
+    bottomGreaterThanOrEqual: z.number().optional(),
+    bottomGreaterThan: z.number().optional(),
+    widthLessThanOrEqual: z.number().optional(),
+    widthLessThan: z.number().optional(),
+    widthGreaterThanOrEqual: z.number().optional(),
+    widthGreaterThan: z.number().optional(),
+    heightLessThanOrEqual: z.number().optional(),
+    heightLessThan: z.number().optional(),
+    heightGreaterThanOrEqual: z.number().optional(),
+    heightGreaterThan: z.number().optional(),
+    xLessThanOrEqual: z.number().optional(),
+    xLessThan: z.number().optional(),
+    xGreaterThanOrEqual: z.number().optional(),
+    xGreaterThan: z.number().optional(),
+    yLessThanOrEqual: z.number().optional(),
+    yLessThan: z.number().optional(),
+    yGreaterThanOrEqual: z.number().optional(),
+    yGreaterThan: z.number().optional()
+});
+
+const layoutPresetsSchema = z.object({
+    nearTop: z.union([
+        z.boolean(),
+        z.object({
+            maxTop: z.number().optional(),
+            minTop: z.number().optional()
+        })
+    ]).optional(),
+    withinViewport: z.union([
+        z.boolean(),
+        z.object({
+            padding: z.number().optional()
+        })
+    ]).optional(),
+    sidebarDoesNotPushContentDown: z.object({
+        sidebarSelector: z.string().min(1),
+        maxTopDifference: z.number().optional()
+    }).optional()
+});
+
+function isLoginUrl(url) {
+    try {
+        return new URL(url).pathname.toLowerCase().includes("/login");
+    } catch {
+        return String(url || "").toLowerCase().includes("/login");
+    }
+}
+
 export async function registerBrowserTools(server, {
     browserConfig,
     authConfig,
@@ -58,11 +133,268 @@ export async function registerBrowserTools(server, {
     });
     const playwrightService = createPlaywrightService();
 
+    function collectDiagnostics(sessionId) {
+        return sessionManager.getDiagnostics(sessionId);
+    }
+
+    function buildDiagnosticsPayload(sessionId, {includeConsole = false, includeNetworkErrors = false} = {}) {
+        const diagnostics = collectDiagnostics(sessionId);
+        return {
+            consoleErrors: includeConsole ? diagnostics.consoleErrors : [],
+            consoleWarnings: includeConsole ? diagnostics.consoleWarnings : [],
+            consoleLogs: includeConsole ? diagnostics.consoleLogs : [],
+            networkErrors: includeNetworkErrors ? diagnostics.networkErrors : [],
+            ignoredNoiseCount: diagnostics.ignoredNoiseCount
+        };
+    }
+
+    async function applyAuthMode({session, baseUrl, auth}) {
+        if (!auth || auth.mode === "none") {
+            return null;
+        }
+
+        if (auth.mode === "useExistingMcpAuth") {
+            return authBridge.authFromApiLogin({
+                session,
+                baseUrl,
+                useExistingMcpAuth: true,
+                storageKey: auth.storageKey
+            });
+        }
+
+        return authBridge.authFromApiLogin({
+            session,
+            baseUrl,
+            login: auth.login,
+            password: auth.password,
+            storageKey: auth.storageKey
+        });
+    }
+
+    function createAuthRedirectError({session, auth, requestedUrl}) {
+        const finalUrl = session?.page?.url?.() || requestedUrl || session?.baseUrl || null;
+        const authenticatedFlow = auth?.mode && auth.mode !== "none";
+        return browserError(
+            authenticatedFlow ? "AUTH_SESSION_EXPIRED" : "AUTH_REDIRECTED_TO_LOGIN",
+            authenticatedFlow
+                ? "Authenticated browser session appears expired or was rejected by the frontend."
+                : "Frontend redirected the browser to the login page.",
+            {
+                url: finalUrl,
+                finalUrl,
+                meta: {
+                    authMode: auth?.mode || "none",
+                    requestedUrl
+                }
+            }
+        );
+    }
+
+    async function ensureNotRedirectedToLogin({session, auth, requestedUrl}) {
+        const finalUrl = session.page.url();
+        if (isLoginUrl(finalUrl)) {
+            throw createAuthRedirectError({session, auth, requestedUrl});
+        }
+    }
+
+    async function navigateWithOptionalTargetWait({session, url, auth, targetSelector}) {
+        try {
+            const navigation = await playwrightService.navigate({session, url, waitUntil: "domcontentloaded"});
+            await ensureNotRedirectedToLogin({session, auth, requestedUrl: url});
+
+            if (targetSelector) {
+                await playwrightService.waitFor({session, selector: targetSelector, state: "visible", timeoutMs: browserConfig.actionTimeoutMs});
+            } else {
+                await playwrightService.waitFor({session, waitUntil: "networkidle", timeoutMs: browserConfig.navigationTimeoutMs});
+            }
+
+            await ensureNotRedirectedToLogin({session, auth, requestedUrl: url});
+            return navigation;
+        } catch (error) {
+            if (error?.code === "REDIRECTED_TO_LOGIN" || isLoginUrl(session?.page?.url?.())) {
+                throw createAuthRedirectError({session, auth, requestedUrl: url});
+            }
+
+            throw error;
+        }
+    }
+
+    async function runPageOpenWorkflow({baseUrl, path, device, headless, viewport, auth, defaultTargetSelector, targetSelector}) {
+        let sessionId = null;
+        let workflowSucceeded = false;
+
+        try {
+            const openedSession = await sessionManager.openSession({baseUrl, device, headless, viewport});
+            sessionId = openedSession.sessionId;
+            const session = sessionManager.getSession(sessionId);
+            const authResult = await applyAuthMode({session, baseUrl, auth});
+            const requestedUrl = new URL(path, baseUrl).toString();
+            const resolvedTargetSelector = targetSelector || defaultTargetSelector || null;
+            const navigation = await navigateWithOptionalTargetWait({session, url: requestedUrl, auth, targetSelector: resolvedTargetSelector});
+
+            let target = null;
+            if (resolvedTargetSelector) {
+                const rectPayload = await playwrightService.getBoundingRect({
+                    session,
+                    selector: resolvedTargetSelector,
+                    timeoutMs: browserConfig.actionTimeoutMs
+                });
+                target = {
+                    selector: resolvedTargetSelector,
+                    rect: rectPayload.rect
+                };
+            }
+
+            const result = asToolResult({
+                ok: true,
+                sessionId,
+                url: navigation.url,
+                title: navigation.title,
+                path,
+                auth: authResult,
+                target,
+                ...buildDiagnosticsPayload(sessionId)
+            });
+            workflowSucceeded = true;
+            return result;
+        } catch (error) {
+            const debug = await safelyCaptureDebugArtifacts({
+                artifactService,
+                sessionManager,
+                sessionId,
+                label: "browser-open-page-error"
+            });
+            return asToolResult(toBrowserErrorPayload(error, {
+                debug,
+                fallbackUrl: sessionId ? sessionManager.findSession(sessionId)?.page?.url?.() || baseUrl : baseUrl
+            }));
+        } finally {
+            if (sessionId && !workflowSucceeded) {
+                await sessionManager.closeSession(sessionId).catch(() => null);
+            }
+        }
+    }
+
+    async function runInspectWorkflow({
+        baseUrl,
+        url,
+        device,
+        headless,
+        viewport,
+        auth,
+        targetSelector,
+        captureStyles,
+        captureConsole,
+        captureNetworkErrors,
+        takeFullPageScreenshot,
+        takeElementScreenshot,
+        styleProperties
+    }) {
+        let sessionId = null;
+
+        try {
+            const openedSession = await sessionManager.openSession({baseUrl, device, headless, viewport});
+            sessionId = openedSession.sessionId;
+            const session = sessionManager.getSession(sessionId);
+            const authResult = await applyAuthMode({session, baseUrl, auth});
+            const navigation = await navigateWithOptionalTargetWait({session, url, auth, targetSelector});
+
+            const artifacts = {};
+            let target = null;
+
+            if (takeFullPageScreenshot) {
+                const fullPagePath = await artifactService.resolveArtifactPath(sessionId, suggestedFileName("page-full"));
+                await playwrightService.screenshot({session, type: "fullPage", path: fullPagePath});
+                artifacts.fullPageScreenshot = fullPagePath;
+            }
+
+            if (targetSelector && takeElementScreenshot) {
+                const elementPath = await artifactService.resolveArtifactPath(sessionId, suggestedFileName(targetSelector));
+                await playwrightService.screenshot({
+                    session,
+                    type: "element",
+                    selector: targetSelector,
+                    path: elementPath,
+                    timeoutMs: browserConfig.actionTimeoutMs
+                });
+                artifacts.elementScreenshot = elementPath;
+            }
+
+            if (targetSelector) {
+                const rectPayload = await playwrightService.getBoundingRect({
+                    session,
+                    selector: targetSelector,
+                    timeoutMs: browserConfig.actionTimeoutMs
+                });
+                target = {
+                    selector: targetSelector,
+                    rect: rectPayload.rect
+                };
+            }
+
+            let computedStyles = null;
+            if (targetSelector && captureStyles) {
+                computedStyles = await playwrightService.getComputedStyles({
+                    session,
+                    selector: targetSelector,
+                    includeParents: true,
+                    stopAt: "body",
+                    properties: styleProperties,
+                    timeoutMs: browserConfig.actionTimeoutMs
+                });
+                artifacts.stylesJson = await artifactService.writeJson(
+                    sessionId,
+                    suggestedFileName("styles", ".json"),
+                    computedStyles
+                );
+            }
+
+            const diagnostics = buildDiagnosticsPayload(sessionId, {
+                includeConsole: captureConsole,
+                includeNetworkErrors: captureNetworkErrors
+            });
+
+            return asToolResult({
+                ok: true,
+                url: navigation.url,
+                title: navigation.title,
+                auth: authResult,
+                artifacts,
+                target,
+                computedStyles: computedStyles?.chain || null,
+                consoleErrors: diagnostics.consoleErrors,
+                consoleWarnings: diagnostics.consoleWarnings,
+                consoleLogs: diagnostics.consoleLogs,
+                networkErrors: diagnostics.networkErrors,
+                ignoredNoiseCount: diagnostics.ignoredNoiseCount
+            });
+        } catch (error) {
+            const debug = await safelyCaptureDebugArtifacts({
+                artifactService,
+                sessionManager,
+                sessionId,
+                label: "browser-inspect-error"
+            });
+            return asToolResult(toBrowserErrorPayload(error, {
+                debug,
+                fallbackUrl: sessionId ? sessionManager.findSession(sessionId)?.page?.url?.() || url || baseUrl : url || baseUrl
+            }));
+        } finally {
+            if (sessionId) {
+                await sessionManager.closeSession(sessionId);
+            }
+        }
+    }
+
     const registeredToolNames = [
         "browser_open_session",
         "browser_close_session",
         "browser_navigate",
         "browser_auth_from_api_login",
+        "browser_open_profile_page",
+        "browser_open_account_home",
+        "browser_open_security_page",
+        "browser_capture_profile_mobile",
         "browser_wait_for",
         "browser_click",
         "browser_fill",
@@ -106,10 +438,7 @@ export async function registerBrowserTools(server, {
                 baseUrl: z.string().url(),
                 device: z.string().optional(),
                 headless: z.boolean().optional(),
-                viewport: z.object({
-                    width: z.number().int().positive(),
-                    height: z.number().int().positive()
-                }).optional()
+                viewport: viewportInputSchema.optional()
             }
         },
         wrapTool(async ({baseUrl, device, headless, viewport}) => ({
@@ -380,48 +709,13 @@ export async function registerBrowserTools(server, {
                 sessionId: z.string().min(1),
                 selector: z.string().min(1),
                 timeoutMs: z.number().int().positive().optional(),
-                assertions: z.object({
-                    topLessThanOrEqual: z.number().optional(),
-                    topLessThan: z.number().optional(),
-                    topGreaterThanOrEqual: z.number().optional(),
-                    topGreaterThan: z.number().optional(),
-                    leftLessThanOrEqual: z.number().optional(),
-                    leftLessThan: z.number().optional(),
-                    leftGreaterThanOrEqual: z.number().optional(),
-                    leftGreaterThan: z.number().optional(),
-                    rightLessThanOrEqual: z.number().optional(),
-                    rightLessThan: z.number().optional(),
-                    rightGreaterThanOrEqual: z.number().optional(),
-                    rightGreaterThan: z.number().optional(),
-                    bottomLessThanOrEqual: z.number().optional(),
-                    bottomLessThan: z.number().optional(),
-                    bottomGreaterThanOrEqual: z.number().optional(),
-                    bottomGreaterThan: z.number().optional(),
-                    widthLessThanOrEqual: z.number().optional(),
-                    widthLessThan: z.number().optional(),
-                    widthGreaterThanOrEqual: z.number().optional(),
-                    widthGreaterThan: z.number().optional(),
-                    heightLessThanOrEqual: z.number().optional(),
-                    heightLessThan: z.number().optional(),
-                    heightGreaterThanOrEqual: z.number().optional(),
-                    heightGreaterThan: z.number().optional(),
-                    xLessThanOrEqual: z.number().optional(),
-                    xLessThan: z.number().optional(),
-                    xGreaterThanOrEqual: z.number().optional(),
-                    xGreaterThan: z.number().optional(),
-                    yLessThanOrEqual: z.number().optional(),
-                    yLessThan: z.number().optional(),
-                    yGreaterThanOrEqual: z.number().optional(),
-                    yGreaterThan: z.number().optional()
-                }).refine(
-                    (value) => Object.values(value).some((entry) => entry !== undefined),
-                    {message: "Provide at least one layout assertion."}
-                )
+                assertions: layoutAssertionsSchema.optional(),
+                presets: layoutPresetsSchema.optional()
             }
         },
-        wrapTool(async ({sessionId, selector, assertions, timeoutMs}) => {
+        wrapTool(async ({sessionId, selector, assertions, presets, timeoutMs}) => {
             const session = sessionManager.getSession(sessionId);
-            return playwrightService.assertLayout({session, selector, assertions, timeoutMs});
+            return playwrightService.assertLayout({session, selector, assertions, presets, timeoutMs});
         }, {debugLabel: "browser-assert-layout-error"})
     );
 
@@ -475,10 +769,14 @@ export async function registerBrowserTools(server, {
             }
         },
         wrapTool(async ({sessionId}) => {
-            const session = sessionManager.getSession(sessionId);
+            sessionManager.getSession(sessionId);
+            const diagnostics = collectDiagnostics(sessionId);
             return {
                 ok: true,
-                logs: [...session.consoleLogs]
+                logs: diagnostics.consoleLogs,
+                consoleErrors: diagnostics.consoleErrors,
+                consoleWarnings: diagnostics.consoleWarnings,
+                ignoredNoiseCount: diagnostics.ignoredNoiseCount
             };
         }, {debugLabel: "browser-console-logs-error"})
     );
@@ -492,12 +790,132 @@ export async function registerBrowserTools(server, {
             }
         },
         wrapTool(async ({sessionId}) => {
-            const session = sessionManager.getSession(sessionId);
+            sessionManager.getSession(sessionId);
+            const diagnostics = collectDiagnostics(sessionId);
             return {
                 ok: true,
-                requests: [...session.networkErrors]
+                requests: diagnostics.networkErrors,
+                networkErrors: diagnostics.networkErrors,
+                ignoredNoiseCount: diagnostics.ignoredNoiseCount
             };
         }, {debugLabel: "browser-network-errors-error"})
+    );
+
+    server.registerTool(
+        "browser_open_profile_page",
+        {
+            description: "Open the authenticated profile page in a new browser session and keep the session alive for follow-up actions.",
+            inputSchema: {
+                baseUrl: z.string().url(),
+                device: z.string().optional(),
+                headless: z.boolean().optional(),
+                viewport: viewportInputSchema.optional(),
+                auth: authInputSchema.optional(),
+                targetSelector: z.string().min(1).optional()
+            }
+        },
+        async ({baseUrl, device, headless, viewport, auth, targetSelector}) => runPageOpenWorkflow({
+            baseUrl,
+            path: "/account/profile",
+            device,
+            headless,
+            viewport,
+            auth,
+            defaultTargetSelector: ".profile-page",
+            targetSelector
+        })
+    );
+
+    server.registerTool(
+        "browser_open_account_home",
+        {
+            description: "Open the authenticated account home page in a new browser session and keep the session alive for follow-up actions.",
+            inputSchema: {
+                baseUrl: z.string().url(),
+                device: z.string().optional(),
+                headless: z.boolean().optional(),
+                viewport: viewportInputSchema.optional(),
+                auth: authInputSchema.optional(),
+                targetSelector: z.string().min(1).optional()
+            }
+        },
+        async ({baseUrl, device, headless, viewport, auth, targetSelector}) => runPageOpenWorkflow({
+            baseUrl,
+            path: "/account",
+            device,
+            headless,
+            viewport,
+            auth,
+            defaultTargetSelector: ".account-home",
+            targetSelector
+        })
+    );
+
+    server.registerTool(
+        "browser_open_security_page",
+        {
+            description: "Open the authenticated security page in a new browser session and keep the session alive for follow-up actions.",
+            inputSchema: {
+                baseUrl: z.string().url(),
+                device: z.string().optional(),
+                headless: z.boolean().optional(),
+                viewport: viewportInputSchema.optional(),
+                auth: authInputSchema.optional(),
+                targetSelector: z.string().min(1).optional()
+            }
+        },
+        async ({baseUrl, device, headless, viewport, auth, targetSelector}) => runPageOpenWorkflow({
+            baseUrl,
+            path: "/account/security",
+            device,
+            headless,
+            viewport,
+            auth,
+            defaultTargetSelector: ".security-page",
+            targetSelector
+        })
+    );
+
+    server.registerTool(
+        "browser_capture_profile_mobile",
+        {
+            description: "Open the profile page in a mobile browser profile, capture screenshots/styles/diagnostics, and close the session.",
+            inputSchema: {
+                baseUrl: z.string().url(),
+                headless: z.boolean().optional(),
+                auth: authInputSchema.optional(),
+                captureStyles: z.boolean().optional(),
+                captureConsole: z.boolean().optional(),
+                captureNetworkErrors: z.boolean().optional(),
+                takeFullPageScreenshot: z.boolean().optional(),
+                takeElementScreenshot: z.boolean().optional(),
+                styleProperties: z.array(z.string().min(1)).optional()
+            }
+        },
+        async ({
+            baseUrl,
+            headless,
+            auth,
+            captureStyles,
+            captureConsole,
+            captureNetworkErrors,
+            takeFullPageScreenshot,
+            takeElementScreenshot,
+            styleProperties
+        }) => runInspectWorkflow({
+            baseUrl,
+            url: new URL("/account/profile", baseUrl).toString(),
+            device: "iPhone 14 Pro Max",
+            headless,
+            auth,
+            targetSelector: ".profile-page",
+            captureStyles: captureStyles ?? true,
+            captureConsole: captureConsole ?? true,
+            captureNetworkErrors: captureNetworkErrors ?? true,
+            takeFullPageScreenshot: takeFullPageScreenshot ?? true,
+            takeElementScreenshot: takeElementScreenshot ?? true,
+            styleProperties
+        })
     );
 
     server.registerTool(
@@ -509,16 +927,8 @@ export async function registerBrowserTools(server, {
                 url: z.string().min(1),
                 device: z.string().optional(),
                 headless: z.boolean().optional(),
-                viewport: z.object({
-                    width: z.number().int().positive(),
-                    height: z.number().int().positive()
-                }).optional(),
-                auth: z.object({
-                    mode: z.enum(["apiLogin", "useExistingMcpAuth", "none"]),
-                    login: z.string().min(1).optional(),
-                    password: z.string().min(1).optional(),
-                    storageKey: z.string().min(1).optional()
-                }).optional(),
+                viewport: viewportInputSchema.optional(),
+                auth: authInputSchema.optional(),
                 targetSelector: z.string().min(1).optional(),
                 captureStyles: z.boolean().optional(),
                 captureConsole: z.boolean().optional(),
@@ -542,116 +952,21 @@ export async function registerBrowserTools(server, {
             takeFullPageScreenshot,
             takeElementScreenshot,
             styleProperties
-        }) => {
-            let sessionId = null;
-
-            try {
-                const openedSession = await sessionManager.openSession({baseUrl, device, headless, viewport});
-                sessionId = openedSession.sessionId;
-                const session = sessionManager.getSession(sessionId);
-
-                if (auth?.mode === "apiLogin") {
-                    await authBridge.authFromApiLogin({
-                        session,
-                        baseUrl,
-                        login: auth.login,
-                        password: auth.password,
-                        storageKey: auth.storageKey
-                    });
-                } else if (auth?.mode === "useExistingMcpAuth") {
-                    await authBridge.authFromApiLogin({
-                        session,
-                        baseUrl,
-                        useExistingMcpAuth: true,
-                        storageKey: auth.storageKey
-                    });
-                }
-
-                const navigation = await playwrightService.navigate({session, url, waitUntil: "domcontentloaded"});
-                if (targetSelector) {
-                    await playwrightService.waitFor({session, selector: targetSelector, state: "visible", timeoutMs: browserConfig.actionTimeoutMs});
-                } else {
-                    await playwrightService.waitFor({session, waitUntil: "networkidle", timeoutMs: browserConfig.navigationTimeoutMs});
-                }
-
-                const artifacts = {};
-                let target = null;
-
-                if (takeFullPageScreenshot) {
-                    const fullPagePath = await artifactService.resolveArtifactPath(sessionId, suggestedFileName("page-full"));
-                    await playwrightService.screenshot({session, type: "fullPage", path: fullPagePath});
-                    artifacts.fullPageScreenshot = fullPagePath;
-                }
-
-                if (targetSelector && takeElementScreenshot) {
-                    const elementPath = await artifactService.resolveArtifactPath(sessionId, suggestedFileName(targetSelector));
-                    await playwrightService.screenshot({
-                        session,
-                        type: "element",
-                        selector: targetSelector,
-                        path: elementPath,
-                        timeoutMs: browserConfig.actionTimeoutMs
-                    });
-                    artifacts.elementScreenshot = elementPath;
-                }
-
-                if (targetSelector) {
-                    const rectPayload = await playwrightService.getBoundingRect({
-                        session,
-                        selector: targetSelector,
-                        timeoutMs: browserConfig.actionTimeoutMs
-                    });
-                    target = {
-                        selector: targetSelector,
-                        rect: rectPayload.rect
-                    };
-                }
-
-                let computedStyles = null;
-                if (targetSelector && captureStyles) {
-                    computedStyles = await playwrightService.getComputedStyles({
-                        session,
-                        selector: targetSelector,
-                        includeParents: true,
-                        stopAt: "body",
-                        properties: styleProperties,
-                        timeoutMs: browserConfig.actionTimeoutMs
-                    });
-                    artifacts.stylesJson = await artifactService.writeJson(
-                        sessionId,
-                        suggestedFileName("styles", ".json"),
-                        computedStyles
-                    );
-                }
-
-                const consoleLogs = captureConsole ? [...session.consoleLogs] : [];
-                const networkErrors = captureNetworkErrors ? [...session.networkErrors] : [];
-
-                return asToolResult({
-                    ok: true,
-                    url: navigation.url,
-                    title: navigation.title,
-                    artifacts,
-                    target,
-                    computedStyles: computedStyles?.chain || null,
-                    consoleErrors: consoleLogs.filter((entry) => entry.type === "error" || entry.type === "pageerror"),
-                    consoleLogs,
-                    networkErrors
-                });
-            } catch (error) {
-                const debug = await safelyCaptureDebugArtifacts({
-                    artifactService,
-                    sessionManager,
-                    sessionId,
-                    label: "browser-inspect-error"
-                });
-                return asToolResult(toBrowserErrorPayload(error, {debug}));
-            } finally {
-                if (sessionId) {
-                    await sessionManager.closeSession(sessionId);
-                }
-            }
-        }
+        }) => runInspectWorkflow({
+            baseUrl,
+            url,
+            device,
+            headless,
+            viewport,
+            auth,
+            targetSelector,
+            captureStyles,
+            captureConsole,
+            captureNetworkErrors,
+            takeFullPageScreenshot,
+            takeElementScreenshot,
+            styleProperties
+        })
     );
 
     return {
