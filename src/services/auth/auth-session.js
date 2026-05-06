@@ -33,6 +33,7 @@ async function parseJsonOrText(response) {
 
 export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutMs}) {
     let token = authConfig.staticToken || null;
+    let refreshToken = authConfig.staticRefreshToken || null;
     let tokenType = authConfig.defaultTokenType || "Bearer";
     let lastUsername = authConfig.username || null;
     let lastPassword = authConfig.password || null;
@@ -46,6 +47,7 @@ export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutM
 
     function clearAuth() {
         token = null;
+        refreshToken = null;
         tokenType = authConfig.defaultTokenType || "Bearer";
     }
 
@@ -53,19 +55,32 @@ export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutM
         return {
             authenticated: Boolean(token),
             tokenType,
+            hasRefreshToken: Boolean(refreshToken),
             hasStoredCredentials: Boolean(lastUsername && lastPassword),
             source: authConfig.staticToken ? "env_token" : "session"
         };
     }
 
-    async function login({username, login, password} = {}) {
+    function getTokens() {
+        return {
+            accessToken: token,
+            refreshToken,
+            tokenType,
+            authenticated: Boolean(token)
+        };
+    }
+
+    async function login({username, login, password, baseUrlOverride} = {}) {
         const resolvedUsername = String(login || username || lastUsername || "").trim();
         const resolvedPassword = String(password || lastPassword || "").trim();
         if (!resolvedUsername || !resolvedPassword) {
             throw new Error("Missing credentials. Provide login/password (or username/password) or set AUTH_USERNAME and AUTH_PASSWORD.");
         }
 
-        const baseUrl = buildBaseUrl();
+        const baseUrl = String(baseUrlOverride || buildBaseUrl() || "").trim();
+        if (!baseUrl) {
+            throw new Error("Missing auth base URL. Provide baseUrl or configure a default auth base URL.");
+        }
         const url = new URL(authConfig.loginPath, baseUrl);
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -95,6 +110,10 @@ export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutM
             }
 
             token = extractedToken;
+            const extractedRefreshToken = getByPath(payload, authConfig.refreshTokenFieldPath);
+            refreshToken = typeof extractedRefreshToken === "string" && extractedRefreshToken.trim()
+                ? extractedRefreshToken.trim()
+                : null;
             const extractedType = getByPath(payload, authConfig.tokenTypeFieldPath);
             tokenType = typeof extractedType === "string" && extractedType.trim()
                 ? extractedType.trim()
@@ -104,7 +123,8 @@ export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutM
 
             return {
                 authenticated: true,
-                tokenType
+                tokenType,
+                hasRefreshToken: Boolean(refreshToken)
             };
         } catch (error) {
             throw new Error(`Unable to login: ${getErrorMessage(error)}`);
@@ -128,6 +148,7 @@ export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutM
     return {
         getAuthorizationHeader,
         getState,
+        getTokens,
         login,
         clearAuth,
         ensureAuthenticated

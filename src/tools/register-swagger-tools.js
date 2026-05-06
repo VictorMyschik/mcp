@@ -438,6 +438,7 @@ export async function registerSwaggerTools(server, {
     swaggerService,
     authConfig,
     apiConfig,
+    authSession: providedAuthSession,
     fetchImpl = fetch
 }) {
     const swagger = await swaggerService.loadSwagger();
@@ -453,7 +454,7 @@ export async function registerSwaggerTools(server, {
         console.warn(warning);
     }
 
-    const authSession = createAuthSession({
+    const authSession = providedAuthSession || createAuthSession({
         authConfig,
         fetchImpl,
         timeoutMs: apiConfig.requestTimeoutMs,
@@ -762,6 +763,7 @@ export async function registerSwaggerTools(server, {
 
     return {
         registeredToolNames: registeredTools,
+        authSession,
         diagnostics: {
             adaptiveMappingWarnings
         }

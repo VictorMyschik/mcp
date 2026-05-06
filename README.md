@@ -1,11 +1,50 @@
 # mcp
 
-MCP server combining PostgreSQL tools and Swagger/OpenAPI tools.
+MCP server combining PostgreSQL, Swagger/OpenAPI, and browser/frontend automation tools.
 
 The Swagger side is designed as an execution layer for another agent:
 - auth is managed inside MCP memory
 - operation tools are generated from Swagger `operationId`
 - consumers do not pass `Authorization` headers, API paths, or HTTP methods
+
+The browser side is designed for frontend diagnostics and UI automation:
+- stateful Playwright Chromium sessions
+- screenshots and DOM/layout inspection
+- frontend auth hydration via API login -> `localStorage`
+- console and network diagnostics
+
+## Browser tool behavior
+
+Registered browser tools:
+- `browser_open_session`
+- `browser_close_session`
+- `browser_navigate`
+- `browser_auth_from_api_login`
+- `browser_wait_for`
+- `browser_click`
+- `browser_fill`
+- `browser_press`
+- `browser_evaluate`
+- `browser_get_text`
+- `browser_get_attribute`
+- `browser_screenshot`
+- `browser_get_bounding_rect`
+- `browser_get_computed_styles`
+- `browser_assert_layout`
+- `browser_save_storage_state`
+- `browser_load_storage_state`
+- `browser_get_console_logs`
+- `browser_get_network_errors`
+- `browser_inspect_page`
+
+### Browser auth flow
+
+Preferred frontend authentication flow:
+1. Obtain API tokens using `auth_login` or `browser_auth_from_api_login`.
+2. Write `{ accessToken, refreshToken, user: null }` into frontend `localStorage`.
+3. Navigate directly to the target authenticated route.
+
+This avoids brittle UI-login dependencies and keeps browser automation stable.
 
 ## Swagger tool behavior
 
@@ -59,16 +98,30 @@ MCP handles:
 Auth/API controls:
 - `AUTH_LOGIN_PATH` (default: `/api/v1/login`)
 - `AUTH_LOGIN_METHOD` (default: `post`)
-- `AUTH_USERNAME_FIELD` (default: `username`)
+- `AUTH_USERNAME_FIELD` (default: `login`)
 - `AUTH_PASSWORD_FIELD` (default: `password`)
 - `AUTH_TOKEN_FIELD_PATH` (default: `content.accessToken`)
+- `AUTH_REFRESH_TOKEN_FIELD_PATH` (default: `content.refreshToken`)
 - `AUTH_TOKEN_TYPE_FIELD_PATH` (default: `content.tokenType`)
 - `AUTH_DEFAULT_TOKEN_TYPE` (default: `Bearer`)
 - `AUTH_TOKEN` (optional pre-seeded static token)
+- `AUTH_REFRESH_TOKEN` (optional pre-seeded static refresh token)
 - `AUTH_USERNAME` / `AUTH_PASSWORD` (optional for auto-login)
 - `AUTH_AUTO_LOGIN` (default: `true`)
 - `API_REQUEST_TIMEOUT_MS` (default: `15000`)
 - `API_RETRY_ON_UNAUTHORIZED` (default: `true`)
+
+Browser controls:
+- `BROWSER_TOOLS_ENABLED` (default: `true`)
+- `BROWSER_HEADLESS_DEFAULT` (default: `true`)
+- `BROWSER_SESSION_TTL_MS` (default: `600000`)
+- `BROWSER_CLEANUP_INTERVAL_MS` (default: `60000`)
+- `BROWSER_NAVIGATION_TIMEOUT_MS` (default: `30000`)
+- `BROWSER_ACTION_TIMEOUT_MS` (default: `30000`)
+- `BROWSER_MAX_CONSOLE_ENTRIES` (default: `200`)
+- `BROWSER_MAX_NETWORK_ERRORS` (default: `200`)
+- `FRONTEND_AUTH_STORAGE_KEY` (default: `auth`)
+- `BROWSER_ARTIFACTS_DIR` (default: `artifacts/browser`)
 
 If required variables are missing, corresponding tool groups are not registered.
 `tool_status` is always available.
@@ -79,16 +132,23 @@ If required variables are missing, corresponding tool groups are not registered.
 - `src/config/env.js` - environment config parsing.
 - `src/infrastructure/db/client.js` - PostgreSQL client factory.
 - `src/services/auth/auth-session.js` - auth session and token management.
+- `src/services/browser/session-manager.js` - stateful Playwright browser/context/page lifecycle.
+- `src/services/browser/playwright-service.js` - navigate, wait, screenshot, DOM geometry, computed styles.
+- `src/services/browser/artifact-service.js` - runtime screenshots, HTML dumps, JSON artifacts.
+- `src/services/browser/auth-bridge.js` - API login to frontend `localStorage` auth hydration.
 - `src/services/swagger/swagger-cache.js` - Swagger loading and cache.
+- `src/tools/register-browser-tools.js` - browser automation MCP tools.
 - `src/tools/register-sql-tools.js` - SQL MCP tools.
 - `src/tools/register-swagger-tools.js` - auth and generated Swagger operation tools.
 - `src/tools/register-health-tool.js` - combined health check tool.
 - `src/tools/register-status-tool.js` - tool availability diagnostics.
+- `scripts/browser-smoke.js` - local end-to-end smoke scenario for browser tools.
 
 ## Run
 
 ```bash
 npm install
+npx playwright install chromium
 npm start
 ```
 
@@ -96,7 +156,173 @@ npm start
 
 ```bash
 npm run check
+npm run smoke:browser
 ```
+
+## Example browser tool calls
+
+### Open a mobile session
+
+```json
+{
+  "baseUrl": "http://outvento.test",
+  "device": "iPhone 14 Pro Max",
+  "headless": true
+}
+```
+
+### Authenticate frontend via API login + localStorage
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "baseUrl": "http://outvento.test",
+  "login": "user@example.com",
+  "password": "secret"
+}
+```
+
+### Navigate and inspect
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "url": "http://outvento.test/account/profile",
+  "waitUntil": "networkidle"
+}
+```
+
+### Interact with the page
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".profile-input",
+  "value": "Ada Lovelace"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".save-button"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".shortcut-input",
+  "key": "Enter"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "expression": "document.querySelector('.save-status').textContent"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".save-status"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".save-button",
+  "name": "data-role"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".profile-page",
+  "assertions": {
+    "topLessThanOrEqual": 80,
+    "widthGreaterThanOrEqual": 390
+  }
+}
+```
+
+### Save and restore storage state
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "fileName": "auth-state.json"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-002",
+  "path": "/.../artifacts/browser/browser-session-001/auth-state.json"
+}
+```
+
+```json
+{
+  "sessionId": "browser-session-001",
+  "selector": ".profile-page",
+  "includeParents": true,
+  "stopAt": "body"
+}
+```
+
+### High-level inspection
+
+```json
+{
+  "baseUrl": "http://outvento.test",
+  "url": "http://outvento.test/account/profile",
+  "device": "iPhone 14 Pro Max",
+  "headless": true,
+  "auth": {
+    "mode": "apiLogin",
+    "login": "user@example.com",
+    "password": "secret"
+  },
+  "targetSelector": ".profile-page",
+  "captureStyles": true,
+  "captureConsole": true,
+  "captureNetworkErrors": true,
+  "takeFullPageScreenshot": true,
+  "takeElementScreenshot": true
+}
+```
+
+## Browser smoke scenario
+
+The included smoke harness starts a local mock frontend/API and validates this flow:
+
+1. `browser_open_session`
+2. `browser_auth_from_api_login`
+3. `browser_navigate`
+4. `browser_wait_for`
+5. `browser_fill`
+6. `browser_click`
+7. `browser_press`
+8. `browser_evaluate`
+9. `browser_get_text`
+10. `browser_get_attribute`
+11. `browser_assert_layout`
+12. `browser_save_storage_state`
+13. `browser_load_storage_state`
+14. `browser_screenshot` (full page)
+15. `browser_screenshot` (element)
+16. `browser_get_bounding_rect`
+17. `browser_get_computed_styles`
+18. `browser_get_console_logs`
+19. `browser_get_network_errors`
+20. `browser_close_session`
+
+Artifacts are written under `artifacts/browser/<sessionId>/...` and are intentionally ignored by Git.
 
 ## Agent runbook (autonomous mode)
 
