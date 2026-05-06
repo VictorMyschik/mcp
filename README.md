@@ -97,3 +97,62 @@ npm start
 ```bash
 npm run check
 ```
+
+## Agent runbook (autonomous mode)
+
+Use this policy for any AI agent that consumes this MCP server.
+
+### 1) Mandatory first-step diagnostics
+
+Always run, in this order:
+1. `tool_status`
+2. `health`
+3. `auth_status`
+
+Do not ask the user what to do before these checks are complete.
+
+### 2) Decision policy
+
+- `tool_status=ok` and `health=ok`:
+  - server is healthy
+  - if request requires auth and `auth_status` is not authenticated, run `auth_login` (when credentials are available) or ask only for missing credentials
+- `tool_status=ok` and `health!=ok`:
+  - perform a soft recovery:
+    1) `auth_logout`
+    2) re-run `auth_status`
+    3) re-run `health`
+  - if still unhealthy, escalate to hard restart instructions
+- `tool_status!=ok`:
+  - skip soft recovery and escalate directly to hard restart instructions
+
+### 3) Soft recovery definition
+
+Soft recovery means MCP session reset only (token/session cleanup), not process restart:
+- `auth_logout`
+- re-check `tool_status`, `health`, `auth_status`
+
+### 4) Hard restart policy
+
+If hard restart is required, the agent must explicitly state that host-level restart is outside MCP tool scope.
+Then provide concrete commands by runtime option:
+
+```bash
+# Docker Compose
+docker-compose restart <mcp_service_name>
+docker-compose restart
+
+# systemd
+sudo systemctl restart mcp
+```
+
+If runtime is unknown, ask one short question: `docker, systemd, or other?`
+
+### 5) Response format requirements
+
+Every operational response should include:
+1. Current state (`tool_status`, `health`, `auth_status`)
+2. Action taken automatically
+3. Next automatic step (or one minimal blocking question)
+
+Avoid open-ended prompts like "How do we proceed?" when a deterministic next step exists.
+
