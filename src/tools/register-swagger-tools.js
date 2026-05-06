@@ -8,10 +8,21 @@ import {asToolResult} from "./tool-result.js";
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
-const DETERMINISTIC_TOOL_TO_OPERATION_ID = {
-    get_profile_page: "getProfilePage",
-    get_translations: "getTranslations",
-    update_profile: "updateProfile"
+const DETERMINISTIC_TOOL_SPECS = {
+    get_profile_page: {
+        preferredOperationId: "getProfilePage",
+        aliases: ["profilePage"],
+        hint: {
+            path: "/api/v1/user/profile/page",
+            method: "get"
+        }
+    },
+    get_translations: {
+        preferredOperationId: "getTranslations"
+    },
+    update_profile: {
+        preferredOperationId: "updateProfile"
+    }
 };
 
 function resolveBaseUrl({swagger, swaggerUrl}) {
@@ -145,12 +156,75 @@ function buildOperationIndex(operations) {
     return operationIndex;
 }
 
-function validateToolOperationMapping(operationIndex, toolToOperationId) {
-    for (const [toolName, operationId] of Object.entries(toolToOperationId)) {
-        if (!operationIndex.has(operationId)) {
-            throw new Error(`Invalid tool mapping: '${toolName}' -> '${operationId}'. operationId not found in Swagger.`);
+function toCoreOperationId(operationId) {
+    const normalized = normalizeOperationId(operationId);
+    return normalized.replace(/^(get|list|create|update|delete|set|fetch)_+/, "");
+}
+
+function resolveDeterministicToolMappings({operationIndex, discoveredOperations, toolSpecs}) {
+    const resolved = new Map();
+    const warnings = [];
+
+    for (const [toolName, toolSpec] of Object.entries(toolSpecs)) {
+        const preferredOperationId = String(toolSpec?.preferredOperationId || "").trim();
+        const aliases = Array.isArray(toolSpec?.aliases)
+            ? toolSpec.aliases.map((value) => String(value || "").trim()).filter(Boolean)
+            : [];
+        const hintPath = String(toolSpec?.hint?.path || "").trim();
+        const hintMethod = String(toolSpec?.hint?.method || "").trim().toLowerCase();
+
+        if (preferredOperationId && operationIndex.has(preferredOperationId)) {
+            resolved.set(toolName, preferredOperationId);
+            continue;
         }
+
+        const aliasMatch = aliases.find((alias) => operationIndex.has(alias));
+        if (aliasMatch) {
+            resolved.set(toolName, aliasMatch);
+            warnings.push(`Adaptive mapping: '${toolName}' switched to alias operationId '${aliasMatch}' (preferred '${preferredOperationId}' not found).`);
+            continue;
+        }
+
+        if (hintPath && hintMethod) {
+            const hintedMatches = discoveredOperations
+                .filter((entry) => entry.path === hintPath && entry.method === hintMethod)
+                .map((entry) => String(entry.operation?.operationId || "").trim())
+                .filter(Boolean);
+
+            if (hintedMatches.length === 1) {
+                resolved.set(toolName, hintedMatches[0]);
+                warnings.push(`Adaptive mapping: '${toolName}' resolved by hint ${hintMethod.toUpperCase()} ${hintPath} -> '${hintedMatches[0]}'.`);
+                continue;
+            }
+
+            if (hintedMatches.length > 1) {
+                warnings.push(`Skipped deterministic wrapper '${toolName}': hint ${hintMethod.toUpperCase()} ${hintPath} is ambiguous (${hintedMatches.join(", ")}).`);
+                continue;
+            }
+        }
+
+        const targetCoreIds = [preferredOperationId, ...aliases]
+            .filter(Boolean)
+            .map((value) => toCoreOperationId(value));
+        const coreMatches = [...operationIndex.keys()].filter((operationId) =>
+            targetCoreIds.includes(toCoreOperationId(operationId))
+        );
+
+        if (coreMatches.length === 1) {
+            resolved.set(toolName, coreMatches[0]);
+            warnings.push(`Adaptive mapping: '${toolName}' resolved by normalized core match -> '${coreMatches[0]}'.`);
+            continue;
+        }
+
+        if (coreMatches.length > 1) {
+            warnings.push(`Skipped deterministic wrapper '${toolName}': normalized match is ambiguous (${coreMatches.join(", ")}).`);
+            continue;
+        }
+
+        warnings.push(`Skipped deterministic wrapper '${toolName}': operationId '${preferredOperationId}' not found in Swagger and no safe adaptive match.`);
     }
+
+    return {resolved, warnings};
 }
 
 function parseResponseError(payload) {
@@ -369,7 +443,15 @@ export async function registerSwaggerTools(server, {
     const swagger = await swaggerService.loadSwagger();
     const discoveredOperations = extractOperations(swagger);
     const operationIndex = buildOperationIndex(discoveredOperations);
-    validateToolOperationMapping(operationIndex, DETERMINISTIC_TOOL_TO_OPERATION_ID);
+    const {resolved: resolvedDeterministicToolMappings, warnings: adaptiveMappingWarnings} = resolveDeterministicToolMappings({
+        operationIndex,
+        discoveredOperations,
+        toolSpecs: DETERMINISTIC_TOOL_SPECS
+    });
+
+    for (const warning of adaptiveMappingWarnings) {
+        console.warn(warning);
+    }
 
     const authSession = createAuthSession({
         authConfig,
@@ -387,7 +469,7 @@ export async function registerSwaggerTools(server, {
         "auth_login",
         "auth_logout",
         "auth_status",
-        ...Object.keys(DETERMINISTIC_TOOL_TO_OPERATION_ID)
+        ...resolvedDeterministicToolMappings.keys()
     ];
 
     server.registerTool(
@@ -395,13 +477,14 @@ export async function registerSwaggerTools(server, {
         {
             description: "Authenticate once and store token in MCP session for future API tools.",
             inputSchema: {
+                login: z.string().min(1).optional(),
                 username: z.string().min(1).optional(),
                 password: z.string().min(1).optional()
             }
         },
-        async ({username, password}) => {
+        async ({login, username, password}) => {
             try {
-                const result = await authSession.login({username, password});
+                const result = await authSession.login({login, username, password});
                 return asToolResult({ok: true, auth: result});
             } catch (error) {
                 return asToolResult({
@@ -559,7 +642,7 @@ export async function registerSwaggerTools(server, {
         }
     );
 
-    for (const [toolName, operationId] of Object.entries(DETERMINISTIC_TOOL_TO_OPERATION_ID)) {
+    for (const [toolName, operationId] of resolvedDeterministicToolMappings.entries()) {
         const requiresBody = toolName === "update_profile";
         server.registerTool(
             toolName,
@@ -678,6 +761,9 @@ export async function registerSwaggerTools(server, {
     }
 
     return {
-        registeredToolNames: registeredTools
+        registeredToolNames: registeredTools,
+        diagnostics: {
+            adaptiveMappingWarnings
+        }
     };
 }

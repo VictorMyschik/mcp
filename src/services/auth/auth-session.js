@@ -58,11 +58,11 @@ export function createAuthSession({authConfig, fetchImpl, buildBaseUrl, timeoutM
         };
     }
 
-    async function login({username, password} = {}) {
-        const resolvedUsername = String(username || lastUsername || "").trim();
+    async function login({username, login, password} = {}) {
+        const resolvedUsername = String(login || username || lastUsername || "").trim();
         const resolvedPassword = String(password || lastPassword || "").trim();
         if (!resolvedUsername || !resolvedPassword) {
-            throw new Error("Missing credentials. Provide username/password or set AUTH_USERNAME and AUTH_PASSWORD.");
+            throw new Error("Missing credentials. Provide login/password (or username/password) or set AUTH_USERNAME and AUTH_PASSWORD.");
         }
 
         const baseUrl = buildBaseUrl();

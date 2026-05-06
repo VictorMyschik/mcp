@@ -51,7 +51,7 @@ export function getConfigFromEnv(env = process.env) {
         auth: {
             loginPath: String(env.AUTH_LOGIN_PATH || "/api/v1/login").trim(),
             loginMethod: String(env.AUTH_LOGIN_METHOD || "post").trim().toLowerCase(),
-            usernameField: String(env.AUTH_USERNAME_FIELD || "username").trim(),
+            usernameField: String(env.AUTH_USERNAME_FIELD || "login").trim(),
             passwordField: String(env.AUTH_PASSWORD_FIELD || "password").trim(),
             tokenFieldPath: String(env.AUTH_TOKEN_FIELD_PATH || "content.accessToken").trim(),
             tokenTypeFieldPath: String(env.AUTH_TOKEN_TYPE_FIELD_PATH || "content.tokenType").trim(),
