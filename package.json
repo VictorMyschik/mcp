@@ -7,7 +7,8 @@
   "scripts": {
     "check": "find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check",
     "start": "node index.js",
-    "smoke:browser": "node ./scripts/browser-smoke.js"
+    "smoke:browser": "node ./scripts/browser-smoke.js",
+    "smoke:swagger": "node ./scripts/swagger-smoke.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

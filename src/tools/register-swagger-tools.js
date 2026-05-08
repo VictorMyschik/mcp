@@ -2,11 +2,41 @@ import * as z from "zod/v4";
 import fetch from "node-fetch";
 
 import {createAuthSession} from "../services/auth/auth-session.js";
-import {normalizeEndpoint} from "../services/swagger/normalize-endpoint.js";
+import {buildRequestUrl, executeHttpRequest} from "../services/swagger/http-executor.js";
+import {collectEndpointSchemaNames, normalizeEndpoint} from "../services/swagger/normalize-endpoint.js";
 import {getErrorMessage} from "../utils/errors.js";
 import {asToolResult} from "./tool-result.js";
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
+const scalarSchema = z.union([z.string(), z.number(), z.boolean()]);
+const headerValueSchema = z.union([scalarSchema, z.array(scalarSchema)]);
+const multipartFieldSchema = z.object({
+    name: z.string().min(1),
+    value: scalarSchema.optional(),
+    filePath: z.string().min(1).optional(),
+    fileName: z.string().min(1).optional(),
+    contentType: z.string().min(1).optional(),
+    text: z.string().optional(),
+    base64: z.string().min(1).optional()
+});
+const rawApiInputSchema = {
+    method: z.string().min(1),
+    baseUrl: z.string().url().optional(),
+    url: z.string().url().optional(),
+    path: z.string().min(1).optional(),
+    pathParams: z.record(z.string(), scalarSchema).optional(),
+    query: z.record(z.string(), z.unknown()).optional(),
+    headers: z.record(z.string(), headerValueSchema).optional(),
+    jsonBody: z.unknown().optional(),
+    textBody: z.string().optional(),
+    multipart: z.object({
+        fields: z.array(multipartFieldSchema).min(1)
+    }).optional(),
+    timeoutMs: z.number().int().positive().optional(),
+    expectedResponseType: z.enum(["auto", "json", "text", "base64"]).optional(),
+    includeRawBody: z.boolean().optional(),
+    useExistingMcpAuth: z.boolean().optional()
+};
 
 const DETERMINISTIC_TOOL_SPECS = {
     get_profile_page: {
@@ -35,49 +65,6 @@ function resolveBaseUrl({swagger, swaggerUrl}) {
         return new URL(swaggerUrl).origin;
     } catch {
         throw new Error("Unable to resolve API base URL from Swagger servers or SWAGGER_URL.");
-    }
-}
-
-function resolvePathTemplate(pathTemplate, pathParams) {
-    const missingPathParams = [];
-
-    const resolvedPath = String(pathTemplate ?? "").replace(/\{([^}]+)}/g, (_, key) => {
-        const value = pathParams?.[key];
-        if (value === undefined || value === null || value === "") {
-            missingPathParams.push(key);
-            return `{${key}}`;
-        }
-
-        return encodeURIComponent(String(value));
-    });
-
-    if (missingPathParams.length > 0) {
-        throw new Error(`Missing required path params: ${missingPathParams.join(", ")}`);
-    }
-
-    return resolvedPath;
-}
-
-function appendQueryParams(url, query) {
-    if (!query || typeof query !== "object") {
-        return;
-    }
-
-    for (const [key, value] of Object.entries(query)) {
-        if (value === undefined || value === null) {
-            continue;
-        }
-
-        if (Array.isArray(value)) {
-            for (const item of value) {
-                if (item !== undefined && item !== null) {
-                    url.searchParams.append(key, String(item));
-                }
-            }
-            continue;
-        }
-
-        url.searchParams.append(key, String(value));
     }
 }
 
@@ -227,16 +214,6 @@ function resolveDeterministicToolMappings({operationIndex, discoveredOperations,
     return {resolved, warnings};
 }
 
-function parseResponseError(payload) {
-    if (typeof payload === "string" && payload.trim()) {
-        return payload;
-    }
-    if (payload && typeof payload === "object") {
-        return payload.message || payload.error || JSON.stringify(payload);
-    }
-    return "Unknown error";
-}
-
 function buildUnauthorizedResult() {
     return {
         ok: false,
@@ -248,22 +225,63 @@ function buildUnauthorizedResult() {
     };
 }
 
-async function parseResponseBody(response) {
-    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
-    const text = await response.text();
-    if (!text) {
-        return null;
-    }
-
-    if (contentType.includes("application/json")) {
-        try {
-            return JSON.parse(text);
-        } catch {
-            return text;
+function buildStructuredExecutionError(error, fallbackKind = "mcp_execution_error") {
+    return {
+        ok: false,
+        error: {
+            kind: fallbackKind,
+            message: getErrorMessage(error)
         }
+    };
+}
+
+function buildOperationPayload(entry) {
+    return {
+        path: entry.path,
+        method: entry.method.toUpperCase(),
+        operationId: entry.operation?.operationId || entry.operationId || null
+    };
+}
+
+function resolveEndpointByInput({operationIndex, swagger, operationId, path, method}) {
+    if (operationId) {
+        return getOperationById(operationIndex, operationId);
     }
 
-    return text;
+    const normalizedPath = String(path || "").trim();
+    const normalizedMethod = String(method || "").trim().toLowerCase();
+    if (!normalizedPath || !normalizedMethod) {
+        throw new Error("Provide either operationId or both path and method.");
+    }
+
+    const operation = swagger.paths?.[normalizedPath]?.[normalizedMethod];
+    if (!operation) {
+        throw new Error(`Swagger endpoint not found: ${normalizedMethod.toUpperCase()} ${normalizedPath}`);
+    }
+
+    return {
+        path: normalizedPath,
+        method: normalizedMethod,
+        pathItem: swagger.paths?.[normalizedPath] || null,
+        operation,
+        operationId: operation.operationId || null
+    };
+}
+
+function buildEndpointInspectionPayload({swagger, entry, includeSchemaDefinitions = false}) {
+    const endpoint = normalizeEndpoint(entry.operation, entry.path, entry.method, entry.pathItem);
+    const schemaNames = collectEndpointSchemaNames(endpoint);
+    return {
+        endpoint,
+        ...(includeSchemaDefinitions
+            ? {
+                schemaDefinitions: Object.fromEntries(
+                    schemaNames.map((schemaName) => [schemaName, swagger.components?.schemas?.[schemaName] || null])
+                )
+            }
+            : {}),
+        schemaNames
+    };
 }
 
 async function executeOperation({
@@ -297,9 +315,7 @@ async function executeOperation({
 
     const swagger = await swaggerService.loadSwagger();
     const baseUrl = baseUrlOverride || resolveBaseUrl({swagger, swaggerUrl: swaggerService.url});
-    const resolvedPath = resolvePathTemplate(path, pathParams);
-    const requestUrl = new URL(resolvedPath, baseUrl);
-    appendQueryParams(requestUrl, query);
+    const requestUrl = buildRequestUrl({baseUrl, path, pathParams, query});
 
     const swaggerRequiresAuth = Array.isArray(operation.security)
         ? operation.security.length > 0
@@ -307,85 +323,67 @@ async function executeOperation({
     const requiresAuth = authMode === "required" ? true : swaggerRequiresAuth;
 
     async function sendRequest() {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), apiConfig.requestTimeoutMs);
+        const requestHeaders = {
+            accept: "application/json"
+        };
 
-        try {
-            const requestHeaders = {
-                accept: "application/json"
-            };
-
-            if (requiresAuth) {
-                if (authMode !== "required") {
-                    await authSession.ensureAuthenticated();
-                }
-                const authorization = authSession.getAuthorizationHeader();
-                if (!authorization) {
-                    throw new Error("Unauthorized: call auth_login first");
-                }
-                requestHeaders.authorization = authorization;
+        if (requiresAuth) {
+            if (authMode !== "required") {
+                await authSession.ensureAuthenticated();
             }
-
-            let serializedBody;
-            if (body !== undefined) {
-                serializedBody = JSON.stringify(body);
-                requestHeaders["content-type"] = "application/json";
+            const authorization = authSession.getAuthorizationHeader();
+            if (!authorization) {
+                throw new Error("Unauthorized: call auth_login first");
             }
-
-            return await fetchImpl(requestUrl.toString(), {
-                method: method.toUpperCase(),
-                headers: requestHeaders,
-                body: serializedBody,
-                signal: controller.signal
-            });
-        } finally {
-            clearTimeout(timeout);
+            requestHeaders.authorization = authorization;
         }
+
+        return executeHttpRequest({
+            fetchImpl,
+            method,
+            requestUrl,
+            headers: requestHeaders,
+            jsonBody: body,
+            timeoutMs: apiConfig.requestTimeoutMs,
+            expectedResponseType: "auto",
+            includeRawBody: false
+        });
     }
 
     let response = await sendRequest();
-    if (response.status === 401 && requiresAuth && apiConfig.retryOnUnauthorized && authMode !== "required") {
+    if (response.error?.status === 401 && requiresAuth && apiConfig.retryOnUnauthorized && authMode !== "required") {
         await authSession.login();
         response = await sendRequest();
     }
 
-    const parsedBody = await parseResponseBody(response);
-
     if (!response.ok) {
-        if (response.status === 401) {
+        if (response.error?.status === 401) {
             return {
                 ...buildUnauthorizedResult(),
-                operation: {
-                    path,
-                    method: method.toUpperCase(),
-                    operationId: operation.operationId || null
-                }
+                operation: buildOperationPayload({path, method, operation})
             };
         }
 
         return {
             ok: false,
             error: {
-                kind: "api_error",
-                status: response.status,
-                message: parseResponseError(parsedBody)
+                kind: response.error?.kind || "api_error",
+                status: response.error?.status || null,
+                message: response.error?.message || "Unknown error",
+                contentType: response.response?.contentType || null,
+                headers: response.response?.headers || null,
+                body: response.response?.body ?? null,
+                rawBody: response.response?.rawBody ?? null,
+                parseError: response.response?.parseError || null
             },
-            operation: {
-                path,
-                method: method.toUpperCase(),
-                operationId: operation.operationId || null
-            }
+            operation: buildOperationPayload({path, method, operation})
         };
     }
 
     return {
         ok: true,
-        operation: {
-            path,
-            method: method.toUpperCase(),
-            operationId: operation.operationId || null
-        },
-        data: parsedBody
+        operation: buildOperationPayload({path, method, operation}),
+        data: response.response?.body ?? null
     };
 }
 
@@ -434,6 +432,63 @@ async function callApiBySwagger({
     });
 }
 
+async function callApiRaw({
+    swaggerService,
+    authSession,
+    apiConfig,
+    fetchImpl,
+    method,
+    baseUrl,
+    url,
+    path,
+    pathParams = {},
+    query = {},
+    headers = {},
+    jsonBody,
+    textBody,
+    multipart,
+    timeoutMs,
+    expectedResponseType = "auto",
+    includeRawBody = false,
+    useExistingMcpAuth = false
+}) {
+    const requestHeaders = {...(headers || {})};
+
+    if (useExistingMcpAuth) {
+        const authorizationHeaderName = Object.keys(requestHeaders).find((headerName) => headerName.toLowerCase() === "authorization");
+        if (!authorizationHeaderName) {
+            await authSession.ensureAuthenticated();
+            const authorization = authSession.getAuthorizationHeader();
+            if (!authorization) {
+                return buildUnauthorizedResult();
+            }
+            requestHeaders.authorization = authorization;
+        }
+    }
+
+    const swagger = swaggerService ? await swaggerService.loadSwagger() : null;
+    const requestUrl = buildRequestUrl({
+        url,
+        baseUrl: baseUrl || (swagger ? resolveBaseUrl({swagger, swaggerUrl: swaggerService.url}) : undefined),
+        path,
+        pathParams,
+        query
+    });
+
+    return executeHttpRequest({
+        fetchImpl,
+        method,
+        requestUrl,
+        headers: requestHeaders,
+        jsonBody,
+        textBody,
+        multipart,
+        timeoutMs: timeoutMs || apiConfig.requestTimeoutMs,
+        expectedResponseType,
+        includeRawBody
+    });
+}
+
 export async function registerSwaggerTools(server, {
     swaggerService,
     authConfig,
@@ -461,11 +516,17 @@ export async function registerSwaggerTools(server, {
         buildBaseUrl: () => resolveBaseUrl({swagger, swaggerUrl: swaggerService.url})
     });
 
+    async function loadLatestSwagger(forceRefresh = false) {
+        return swaggerService.loadSwagger({forceRefresh});
+    }
+
     const registeredTools = [
         "list_api_endpoints",
         "get_endpoint",
+        "inspect_swagger_endpoint",
         "get_schema",
         "find_endpoint_by_keyword",
+        "call_api_raw",
         "call_api_by_swagger",
         "auth_login",
         "auth_logout",
@@ -495,6 +556,61 @@ export async function registerSwaggerTools(server, {
                         message: getErrorMessage(error)
                     }
                 });
+            }
+        }
+    );
+
+    server.registerTool(
+        "call_api_raw",
+        {
+            description: "Make a raw HTTP request with full control over method, URL construction, headers, query params, body mode, and response parsing.",
+            inputSchema: rawApiInputSchema
+        },
+        async ({
+            method,
+            baseUrl,
+            url,
+            path,
+            pathParams = {},
+            query = {},
+            headers = {},
+            jsonBody,
+            textBody,
+            multipart,
+            timeoutMs,
+            expectedResponseType,
+            includeRawBody,
+            useExistingMcpAuth
+        }) => {
+            try {
+                const result = await callApiRaw({
+                    swaggerService,
+                    authSession,
+                    apiConfig,
+                    fetchImpl,
+                    method,
+                    baseUrl,
+                    url,
+                    path,
+                    pathParams,
+                    query,
+                    headers,
+                    jsonBody,
+                    textBody,
+                    multipart,
+                    timeoutMs,
+                    expectedResponseType,
+                    includeRawBody,
+                    useExistingMcpAuth
+                });
+
+                return asToolResult(result);
+            } catch (error) {
+                if (getErrorMessage(error).includes("Unauthorized: call auth_login first")) {
+                    return asToolResult(buildUnauthorizedResult());
+                }
+
+                return asToolResult(buildStructuredExecutionError(error, "request_validation_error"));
             }
         }
     );
@@ -532,13 +648,7 @@ export async function registerSwaggerTools(server, {
                     return asToolResult(buildUnauthorizedResult());
                 }
 
-                return asToolResult({
-                    ok: false,
-                    error: {
-                        kind: "mcp_execution_error",
-                        message: getErrorMessage(error)
-                    }
-                });
+                return asToolResult(buildStructuredExecutionError(error));
             }
         }
     );
@@ -568,11 +678,13 @@ export async function registerSwaggerTools(server, {
         "list_api_endpoints",
         {
             description: "List all Swagger path entries.",
-            inputSchema: {}
+            inputSchema: {
+                forceRefresh: z.boolean().optional()
+            }
         },
-        async () => {
+        async ({forceRefresh} = {}) => {
             try {
-                const latestSwagger = await swaggerService.loadSwagger();
+                const latestSwagger = await loadLatestSwagger(forceRefresh);
                 return asToolResult({paths: Object.keys(latestSwagger.paths || {})});
             } catch (error) {
                 throw new Error(`Failed to list API endpoints: ${getErrorMessage(error)}`);
@@ -586,17 +698,53 @@ export async function registerSwaggerTools(server, {
             description: "Get operation details by path and HTTP method.",
             inputSchema: {
                 path: z.string().min(1),
-                method: z.string().min(1)
+                method: z.string().min(1),
+                forceRefresh: z.boolean().optional()
             }
         },
-        async ({path, method}) => {
+        async ({path, method, forceRefresh}) => {
             try {
-                const latestSwagger = await swaggerService.loadSwagger();
+                const latestSwagger = await loadLatestSwagger(forceRefresh);
                 const normalizedMethod = String(method ?? "").toLowerCase();
                 const endpoint = latestSwagger.paths?.[path]?.[normalizedMethod] || null;
-                return asToolResult({endpoint: normalizeEndpoint(endpoint, path, normalizedMethod)});
+                return asToolResult({
+                    endpoint: normalizeEndpoint(endpoint, path, normalizedMethod, latestSwagger.paths?.[path] || null)
+                });
             } catch (error) {
                 throw new Error(`Failed to get endpoint details: ${getErrorMessage(error)}`);
+            }
+        }
+    );
+
+    server.registerTool(
+        "inspect_swagger_endpoint",
+        {
+            description: "Inspect a Swagger endpoint by operationId or path+method, including request/response schemas and optionally referenced schema definitions.",
+            inputSchema: {
+                operationId: z.string().min(1).optional(),
+                path: z.string().min(1).optional(),
+                method: z.string().min(1).optional(),
+                includeSchemaDefinitions: z.boolean().optional(),
+                forceRefresh: z.boolean().optional()
+            }
+        },
+        async ({operationId, path, method, includeSchemaDefinitions, forceRefresh}) => {
+            try {
+                const latestSwagger = await loadLatestSwagger(forceRefresh);
+                const entry = resolveEndpointByInput({
+                    operationIndex,
+                    swagger: latestSwagger,
+                    operationId,
+                    path,
+                    method
+                });
+                return asToolResult(buildEndpointInspectionPayload({
+                    swagger: latestSwagger,
+                    entry,
+                    includeSchemaDefinitions
+                }));
+            } catch (error) {
+                return asToolResult(buildStructuredExecutionError(error, "swagger_inspection_error"));
             }
         }
     );
@@ -606,12 +754,13 @@ export async function registerSwaggerTools(server, {
         {
             description: "Get schema definition by name from Swagger components.",
             inputSchema: {
-                name: z.string().min(1)
+                name: z.string().min(1),
+                forceRefresh: z.boolean().optional()
             }
         },
-        async ({name}) => {
+        async ({name, forceRefresh}) => {
             try {
-                const latestSwagger = await swaggerService.loadSwagger();
+                const latestSwagger = await loadLatestSwagger(forceRefresh);
                 return asToolResult({schema: latestSwagger.components?.schemas?.[name] || null});
             } catch (error) {
                 throw new Error(`Failed to get schema: ${getErrorMessage(error)}`);
@@ -624,16 +773,17 @@ export async function registerSwaggerTools(server, {
         {
             description: "Find Swagger paths containing a keyword.",
             inputSchema: {
-                keyword: z.string()
+                keyword: z.string(),
+                forceRefresh: z.boolean().optional()
             }
         },
-        async ({keyword}) => {
+        async ({keyword, forceRefresh}) => {
             const normalizedKeyword = String(keyword ?? "").trim();
             if (!normalizedKeyword) {
                 return asToolResult({paths: []});
             }
 
-            const latestSwagger = await swaggerService.loadSwagger();
+            const latestSwagger = await loadLatestSwagger(forceRefresh);
             const searchKeyword = normalizedKeyword.toLowerCase();
             const paths = Object.keys(latestSwagger.paths || {}).filter((path) =>
                 path.toLowerCase().includes(searchKeyword)

@@ -183,6 +183,31 @@ function toRect(rect) {
     };
 }
 
+function toInputFileSummary(file) {
+    if (typeof file === "string") {
+        return {
+            source: "path",
+            path: file,
+            name: file.split(/[\\/]/).pop() || null
+        };
+    }
+
+    if (file && typeof file === "object") {
+        return {
+            source: file.path ? "path" : "payload",
+            path: file.path || null,
+            name: file.name || file.path?.split(/[\\/]/).pop() || null,
+            mimeType: file.mimeType || null,
+            size: file.buffer ? file.buffer.length : null
+        };
+    }
+
+    return {
+        source: "unknown",
+        name: null
+    };
+}
+
 export function createPlaywrightService() {
     async function getViewportMetrics(session) {
         return session.page.evaluate(() => ({
@@ -484,6 +509,37 @@ export function createPlaywrightService() {
         };
     }
 
+    async function setInputFiles({session, selector, files, timeoutMs}) {
+        const timeout = normalizeTimeout(timeoutMs);
+        const locator = await waitForLocator(session.page, selector, timeout, "attached");
+        const normalizedFiles = Array.isArray(files) ? files : [files];
+        if (normalizedFiles.length === 0) {
+            throw browserError("INVALID_INPUT_FILES", "browser_set_input_files requires at least one file.");
+        }
+
+        await locator.setInputFiles(normalizedFiles, {timeout});
+
+        const inputState = await locator.evaluate((element) => ({
+            isMultiple: Boolean(element.multiple),
+            files: Array.from(element.files || []).map((file) => ({
+                name: file.name,
+                size: file.size,
+                type: file.type,
+                lastModified: file.lastModified
+            }))
+        }));
+
+        return {
+            ok: true,
+            selector,
+            url: session.page.url(),
+            fileCount: inputState.files.length,
+            isMultiple: inputState.isMultiple,
+            requestedFiles: normalizedFiles.map(toInputFileSummary),
+            appliedFiles: inputState.files
+        };
+    }
+
     async function press({session, key, selector, timeoutMs, waitUntil}) {
         const timeout = normalizeTimeout(timeoutMs);
         const resolvedWaitUntil = ensureWaitUntil(waitUntil);
@@ -670,6 +726,7 @@ export function createPlaywrightService() {
         loadStorageState,
         click,
         fill,
+        setInputFiles,
         press,
         evaluate,
         assertLayout,

@@ -1,4 +1,6 @@
 import * as z from "zod/v4";
+import path from "node:path";
+import {readFile} from "node:fs/promises";
 import fetch from "node-fetch";
 
 import {createAuthSession} from "../services/auth/auth-session.js";
@@ -99,6 +101,17 @@ const layoutPresetsSchema = z.object({
     }).optional()
 });
 
+const browserInputFileSchema = z.union([
+    z.string().min(1),
+    z.object({
+        path: z.string().min(1).optional(),
+        name: z.string().min(1).optional(),
+        mimeType: z.string().min(1).optional(),
+        text: z.string().optional(),
+        base64: z.string().min(1).optional()
+    })
+]);
+
 function isLoginUrl(url) {
     try {
         return new URL(url).pathname.toLowerCase().includes("/login");
@@ -132,6 +145,85 @@ export async function registerBrowserTools(server, {
         defaultStorageKey: browserConfig.frontendAuthStorageKey
     });
     const playwrightService = createPlaywrightService();
+
+    function inferMimeType(fileName, fallback = "application/octet-stream") {
+        const extension = path.extname(String(fileName || "")).toLowerCase();
+        switch (extension) {
+            case ".txt":
+                return "text/plain";
+            case ".json":
+                return "application/json";
+            case ".png":
+                return "image/png";
+            case ".jpg":
+            case ".jpeg":
+                return "image/jpeg";
+            case ".gif":
+                return "image/gif";
+            case ".webp":
+                return "image/webp";
+            case ".svg":
+                return "image/svg+xml";
+            case ".pdf":
+                return "application/pdf";
+            default:
+                return fallback;
+        }
+    }
+
+    async function resolveBrowserInputFiles(files) {
+        const normalizedFiles = Array.isArray(files) ? files : [files];
+        if (normalizedFiles.length === 0) {
+            throw browserError("INVALID_INPUT_FILES", "browser_set_input_files requires at least one file.");
+        }
+
+        return Promise.all(normalizedFiles.map(async (file, index) => {
+            if (typeof file === "string") {
+                const filePath = String(file).trim();
+                const fileName = path.basename(filePath);
+                return {
+                    name: fileName,
+                    mimeType: inferMimeType(fileName),
+                    buffer: await readFile(filePath)
+                };
+            }
+
+            const hasPath = Boolean(String(file?.path || "").trim());
+            const hasText = Object.prototype.hasOwnProperty.call(file || {}, "text");
+            const hasBase64 = Boolean(String(file?.base64 || "").trim());
+            const specifiedSources = [hasPath, hasText, hasBase64].filter(Boolean).length;
+            if (specifiedSources !== 1) {
+                throw browserError(
+                    "INVALID_INPUT_FILE",
+                    `Each browser input file must use exactly one source: path, text, or base64 (item ${index + 1}).`
+                );
+            }
+
+            if (hasPath) {
+                const filePath = String(file.path).trim();
+                const fileName = String(file.name || path.basename(filePath)).trim();
+                return {
+                    name: fileName,
+                    mimeType: String(file.mimeType || inferMimeType(fileName)).trim() || inferMimeType(fileName),
+                    buffer: await readFile(filePath)
+                };
+            }
+
+            if (hasBase64) {
+                return {
+                    name: String(file.name || `upload-${index + 1}.bin`).trim(),
+                    mimeType: String(file.mimeType || "application/octet-stream").trim() || "application/octet-stream",
+                    buffer: Buffer.from(String(file.base64 || ""), "base64")
+                };
+            }
+
+            return {
+                name: String(file.name || `upload-${index + 1}.txt`).trim(),
+                mimeType: String(file.mimeType || "text/plain").trim() || "text/plain",
+                buffer: Buffer.from(String(file.text ?? ""), "utf8")
+            };
+        }));
+    }
 
     function collectDiagnostics(sessionId) {
         return sessionManager.getDiagnostics(sessionId);
@@ -391,6 +483,8 @@ export async function registerBrowserTools(server, {
         "browser_close_session",
         "browser_navigate",
         "browser_auth_from_api_login",
+        "browser_set_local_storage",
+        "browser_seed_auth_state",
         "browser_open_profile_page",
         "browser_open_account_home",
         "browser_open_security_page",
@@ -398,6 +492,7 @@ export async function registerBrowserTools(server, {
         "browser_wait_for",
         "browser_click",
         "browser_fill",
+        "browser_set_input_files",
         "browser_press",
         "browser_evaluate",
         "browser_get_text",
@@ -507,6 +602,79 @@ export async function registerBrowserTools(server, {
     );
 
     server.registerTool(
+        "browser_set_local_storage",
+        {
+            description: "Set a localStorage key to a JSON-serializable value for a specific origin inside an existing browser session.",
+            inputSchema: {
+                sessionId: z.string().min(1),
+                origin: z.string().url(),
+                key: z.string().min(1),
+                value: z.unknown(),
+                reloadPage: z.boolean().optional(),
+                navigateToOrigin: z.boolean().optional(),
+                persistInitScript: z.boolean().optional()
+            }
+        },
+        wrapTool(async ({sessionId, origin, key, value, reloadPage, navigateToOrigin, persistInitScript}) => {
+            const session = sessionManager.getSession(sessionId);
+            return authBridge.persistLocalStorageValue({
+                session,
+                origin,
+                key,
+                value,
+                reloadPage,
+                navigateToOrigin,
+                persistInitScript
+            });
+        }, {debugLabel: "browser-local-storage-error"})
+    );
+
+    server.registerTool(
+        "browser_seed_auth_state",
+        {
+            description: "Seed a typical frontend auth object into localStorage for the current browser session/origin.",
+            inputSchema: {
+                sessionId: z.string().min(1),
+                origin: z.string().url().optional(),
+                storageKey: z.string().min(1).optional(),
+                accessToken: z.string().min(1),
+                refreshToken: z.string().optional(),
+                user: z.unknown().optional(),
+                extra: z.record(z.string(), z.unknown()).optional(),
+                reloadPage: z.boolean().optional(),
+                navigateToOrigin: z.boolean().optional(),
+                persistInitScript: z.boolean().optional()
+            }
+        },
+        wrapTool(async ({
+            sessionId,
+            origin,
+            storageKey,
+            accessToken,
+            refreshToken,
+            user,
+            extra,
+            reloadPage,
+            navigateToOrigin,
+            persistInitScript
+        }) => {
+            const session = sessionManager.getSession(sessionId);
+            return authBridge.seedAuthState({
+                session,
+                origin,
+                storageKey,
+                accessToken,
+                refreshToken,
+                user,
+                extra,
+                reloadPage,
+                navigateToOrigin,
+                persistInitScript
+            });
+        }, {debugLabel: "browser-seed-auth-state-error"})
+    );
+
+    server.registerTool(
         "browser_wait_for",
         {
             description: "Wait for a selector, load state, or URL condition inside an existing browser session.",
@@ -568,6 +736,28 @@ export async function registerBrowserTools(server, {
             const session = sessionManager.getSession(sessionId);
             return playwrightService.fill({session, selector, value, timeoutMs});
         }, {debugLabel: "browser-fill-error"})
+    );
+
+    server.registerTool(
+        "browser_set_input_files",
+        {
+            description: "Attach one or more local or in-memory files to an <input type='file'> element.",
+            inputSchema: {
+                sessionId: z.string().min(1),
+                selector: z.string().min(1),
+                files: z.array(browserInputFileSchema).min(1),
+                timeoutMs: z.number().int().positive().optional()
+            }
+        },
+        wrapTool(async ({sessionId, selector, files, timeoutMs}) => {
+            const session = sessionManager.getSession(sessionId);
+            return playwrightService.setInputFiles({
+                session,
+                selector,
+                files: await resolveBrowserInputFiles(files),
+                timeoutMs
+            });
+        }, {debugLabel: "browser-set-input-files-error"})
     );
 
     server.registerTool(

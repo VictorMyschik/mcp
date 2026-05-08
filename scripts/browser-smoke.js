@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import {once} from "node:events";
-import {access} from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import {access, mkdtemp, rm, writeFile} from "node:fs/promises";
 import http from "node:http";
 
 import {createAuthSession} from "../src/services/auth/auth-session.js";
@@ -241,7 +243,49 @@ async function startFixtureServer() {
 
         if (request.method === "GET" && requestUrl.pathname === "/") {
             response.writeHead(200, {"content-type": "text/html; charset=utf-8"});
-            response.end(renderPage('<main class="home-page">Home page</main>'));
+            response.end(renderPage(`
+                <main class="home-page">
+                    Home page
+                    <div class="settings-status"></div>
+                </main>
+                <script>
+                    const settingsRaw = window.localStorage.getItem('settings');
+                    document.querySelector('.settings-status').textContent = settingsRaw || 'no-settings';
+                </script>
+            `));
+            return;
+        }
+
+        if (request.method === "GET" && requestUrl.pathname === "/file-upload") {
+            response.writeHead(200, {"content-type": "text/html; charset=utf-8"});
+            response.end(renderPage(`
+                <main class="file-upload-page">
+                    <label>
+                        Single file
+                        <input class="single-upload" type="file" />
+                    </label>
+                    <div class="single-files">empty</div>
+
+                    <label>
+                        Multiple files
+                        <input class="multi-upload" type="file" multiple />
+                    </label>
+                    <div class="multi-files">empty</div>
+                </main>
+                <script>
+                    const singleInput = document.querySelector('.single-upload');
+                    const multiInput = document.querySelector('.multi-upload');
+                    const singleFiles = document.querySelector('.single-files');
+                    const multiFiles = document.querySelector('.multi-files');
+
+                    singleInput.addEventListener('change', () => {
+                        singleFiles.textContent = Array.from(singleInput.files || []).map((file) => file.name).join(', ') || 'empty';
+                    });
+                    multiInput.addEventListener('change', () => {
+                        multiFiles.textContent = Array.from(multiInput.files || []).map((file) => file.name).join(', ') || 'empty';
+                    });
+                </script>
+            `));
             return;
         }
 
@@ -337,11 +381,16 @@ async function run() {
     }));
 
     const smokeResults = {};
+    const uploadTempDir = await mkdtemp(path.join(os.tmpdir(), "outvento-browser-smoke-"));
+    const uploadFilePath = path.join(uploadTempDir, "from-disk.txt");
+    await writeFile(uploadFilePath, "file-from-disk", "utf8");
     let sessionId = null;
     let restoredSessionId = null;
     let profileSessionId = null;
     let accountSessionId = null;
     let securitySessionId = null;
+    let seedAuthSessionId = null;
+    let storageSessionId = null;
 
     try {
         smokeResults.browser_open_session = await fakeServer.call("browser_open_session", {
@@ -377,6 +426,76 @@ async function run() {
             timeoutMs: 15000
         });
         assert.equal(smokeResults.browser_wait_for.ok, true);
+
+        smokeResults.browser_navigate_file_upload = await fakeServer.call("browser_navigate", {
+            sessionId,
+            url: `${fixture.baseUrl}/file-upload`,
+            waitUntil: "domcontentloaded"
+        });
+        assert.equal(smokeResults.browser_navigate_file_upload.ok, true);
+
+        smokeResults.browser_set_input_files_single = await fakeServer.call("browser_set_input_files", {
+            sessionId,
+            selector: ".single-upload",
+            files: [
+                {
+                    name: "single.txt",
+                    mimeType: "text/plain",
+                    text: "single-file-content"
+                }
+            ]
+        });
+        assert.equal(smokeResults.browser_set_input_files_single.ok, true);
+        assert.equal(smokeResults.browser_set_input_files_single.fileCount, 1);
+        assert.equal(smokeResults.browser_set_input_files_single.appliedFiles[0].name, "single.txt");
+
+        smokeResults.browser_get_text_single_files = await fakeServer.call("browser_get_text", {
+            sessionId,
+            selector: ".single-files"
+        });
+        assert.equal(smokeResults.browser_get_text_single_files.ok, true);
+        assert.equal(smokeResults.browser_get_text_single_files.text, "single.txt");
+
+        smokeResults.browser_set_input_files_multiple = await fakeServer.call("browser_set_input_files", {
+            sessionId,
+            selector: ".multi-upload",
+            files: [
+                uploadFilePath,
+                {
+                    name: "inline.json",
+                    mimeType: "application/json",
+                    base64: Buffer.from('{"hello":"world"}', "utf8").toString("base64")
+                }
+            ]
+        });
+        assert.equal(smokeResults.browser_set_input_files_multiple.ok, true);
+        assert.equal(smokeResults.browser_set_input_files_multiple.fileCount, 2);
+        assert.equal(smokeResults.browser_set_input_files_multiple.isMultiple, true);
+        assert.equal(smokeResults.browser_set_input_files_multiple.appliedFiles[0].name, "from-disk.txt");
+        assert.equal(smokeResults.browser_set_input_files_multiple.appliedFiles[1].name, "inline.json");
+
+        smokeResults.browser_get_text_multi_files = await fakeServer.call("browser_get_text", {
+            sessionId,
+            selector: ".multi-files"
+        });
+        assert.equal(smokeResults.browser_get_text_multi_files.ok, true);
+        assert.ok(smokeResults.browser_get_text_multi_files.text.includes("from-disk.txt"));
+        assert.ok(smokeResults.browser_get_text_multi_files.text.includes("inline.json"));
+
+        smokeResults.browser_navigate_back_to_profile = await fakeServer.call("browser_navigate", {
+            sessionId,
+            url: `${fixture.baseUrl}/account/profile`,
+            waitUntil: "domcontentloaded"
+        });
+        assert.equal(smokeResults.browser_navigate_back_to_profile.ok, true);
+
+        smokeResults.browser_wait_for_profile_again = await fakeServer.call("browser_wait_for", {
+            sessionId,
+            selector: ".profile-page",
+            state: "visible",
+            timeoutMs: 15000
+        });
+        assert.equal(smokeResults.browser_wait_for_profile_again.ok, true);
 
         smokeResults.browser_screenshot_full = await fakeServer.call("browser_screenshot", {
             sessionId,
@@ -573,6 +692,76 @@ async function run() {
         assert.ok(smokeResults.browser_capture_profile_mobile.networkErrors.some((entry) => entry.status === 500));
         assert.ok(smokeResults.browser_capture_profile_mobile.ignoredNoiseCount >= 2);
 
+        smokeResults.browser_open_session_storage = await fakeServer.call("browser_open_session", {
+            baseUrl: fixture.baseUrl,
+            headless: true
+        });
+        assert.equal(smokeResults.browser_open_session_storage.ok, true);
+        storageSessionId = smokeResults.browser_open_session_storage.sessionId;
+
+        smokeResults.browser_set_local_storage = await fakeServer.call("browser_set_local_storage", {
+            sessionId: storageSessionId,
+            origin: fixture.baseUrl,
+            key: "settings",
+            value: {
+                locale: "uk",
+                theme: "dark"
+            },
+            navigateToOrigin: true,
+            reloadPage: true
+        });
+        assert.equal(smokeResults.browser_set_local_storage.ok, true);
+        assert.equal(smokeResults.browser_set_local_storage.origin, fixture.baseUrl);
+
+        smokeResults.browser_get_text_settings_status = await fakeServer.call("browser_get_text", {
+            sessionId: storageSessionId,
+            selector: ".settings-status"
+        });
+        assert.equal(smokeResults.browser_get_text_settings_status.ok, true);
+        assert.ok(smokeResults.browser_get_text_settings_status.text.includes('"locale":"uk"'));
+
+        smokeResults.browser_open_session_seed_auth = await fakeServer.call("browser_open_session", {
+            baseUrl: fixture.baseUrl,
+            headless: true
+        });
+        assert.equal(smokeResults.browser_open_session_seed_auth.ok, true);
+        seedAuthSessionId = smokeResults.browser_open_session_seed_auth.sessionId;
+
+        smokeResults.browser_seed_auth_state = await fakeServer.call("browser_seed_auth_state", {
+            sessionId: seedAuthSessionId,
+            origin: fixture.baseUrl,
+            accessToken: "access-token-demo",
+            refreshToken: "refresh-token-demo",
+            user: {
+                id: 1,
+                email: VALID_LOGIN
+            }
+        });
+        assert.equal(smokeResults.browser_seed_auth_state.ok, true);
+        assert.equal(smokeResults.browser_seed_auth_state.storageKey, STORAGE_KEY);
+
+        smokeResults.browser_navigate_seed_auth = await fakeServer.call("browser_navigate", {
+            sessionId: seedAuthSessionId,
+            url: `${fixture.baseUrl}/account/profile`,
+            waitUntil: "domcontentloaded"
+        });
+        assert.equal(smokeResults.browser_navigate_seed_auth.ok, true);
+
+        smokeResults.browser_wait_for_seed_auth = await fakeServer.call("browser_wait_for", {
+            sessionId: seedAuthSessionId,
+            selector: ".profile-page",
+            state: "visible",
+            timeoutMs: 15000
+        });
+        assert.equal(smokeResults.browser_wait_for_seed_auth.ok, true);
+
+        smokeResults.browser_evaluate_seed_auth = await fakeServer.call("browser_evaluate", {
+            sessionId: seedAuthSessionId,
+            expression: "JSON.parse(localStorage.getItem('auth')).user.email"
+        });
+        assert.equal(smokeResults.browser_evaluate_seed_auth.ok, true);
+        assert.equal(smokeResults.browser_evaluate_seed_auth.result, VALID_LOGIN);
+
         smokeResults.authless_browser_open_session = await authlessServer.call("browser_open_session", {
             baseUrl: fixture.baseUrl,
             headless: true
@@ -636,6 +825,14 @@ async function run() {
         smokeResults.browser_close_security_session = await fakeServer.call("browser_close_session", {sessionId: securitySessionId});
         assert.equal(smokeResults.browser_close_security_session.ok, true);
         securitySessionId = null;
+
+        smokeResults.browser_close_storage_session = await fakeServer.call("browser_close_session", {sessionId: storageSessionId});
+        assert.equal(smokeResults.browser_close_storage_session.ok, true);
+        storageSessionId = null;
+
+        smokeResults.browser_close_seed_auth_session = await fakeServer.call("browser_close_session", {sessionId: seedAuthSessionId});
+        assert.equal(smokeResults.browser_close_seed_auth_session.ok, true);
+        seedAuthSessionId = null;
 
         smokeResults.browser_close_session = await fakeServer.call("browser_close_session", {sessionId});
         assert.equal(smokeResults.browser_close_session.ok, true);
@@ -722,6 +919,13 @@ async function run() {
         if (securitySessionId) {
             await fakeServer.call("browser_close_session", {sessionId: securitySessionId}).catch(() => undefined);
         }
+        if (storageSessionId) {
+            await fakeServer.call("browser_close_session", {sessionId: storageSessionId}).catch(() => undefined);
+        }
+        if (seedAuthSessionId) {
+            await fakeServer.call("browser_close_session", {sessionId: seedAuthSessionId}).catch(() => undefined);
+        }
+        await rm(uploadTempDir, {recursive: true, force: true}).catch(() => undefined);
         await new Promise((resolve) => fixture.server.close(resolve));
     }
 }

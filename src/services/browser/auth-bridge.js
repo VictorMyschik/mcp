@@ -10,23 +10,130 @@ function resolveOrigin(baseUrl) {
 }
 
 export function createBrowserAuthBridge({sharedAuthSession, fallbackAuthSession, defaultStorageKey}) {
+    async function writeLocalStorageValue({page, key, value}) {
+        await page.evaluate(({storageKey, storageValue}) => {
+            window.localStorage.setItem(storageKey, JSON.stringify(storageValue));
+        }, {
+            storageKey: key,
+            storageValue: value
+        });
+    }
+
+    async function persistLocalStorageValue({
+        session,
+        origin,
+        key,
+        value,
+        reloadPage = false,
+        navigateToOrigin = false,
+        persistInitScript = true
+    }) {
+        const resolvedOrigin = resolveOrigin(origin || session.baseUrl);
+        const resolvedKey = String(key || "").trim();
+        if (!resolvedKey) {
+            throw browserError("INVALID_LOCAL_STORAGE_KEY", "localStorage key must be a non-empty string.");
+        }
+
+        if (persistInitScript) {
+            await session.context.addInitScript(({storageKey, storageValue}) => {
+                window.localStorage.setItem(storageKey, JSON.stringify(storageValue));
+            }, {
+                storageKey: resolvedKey,
+                storageValue: value
+            });
+        }
+
+        const currentUrl = session.page?.url?.() || "";
+        const currentOrigin = currentUrl ? resolveOrigin(currentUrl) : null;
+        const currentPageMatchesOrigin = currentOrigin === resolvedOrigin;
+        let usedTemporaryPage = false;
+
+        if (currentPageMatchesOrigin) {
+            await writeLocalStorageValue({page: session.page, key: resolvedKey, value});
+        } else {
+            const tempPage = await session.context.newPage();
+            usedTemporaryPage = true;
+            try {
+                await tempPage.goto(resolvedOrigin, {waitUntil: "domcontentloaded"});
+                await writeLocalStorageValue({page: tempPage, key: resolvedKey, value});
+            } finally {
+                await tempPage.close().catch(() => null);
+            }
+        }
+
+        let reloaded = false;
+        let navigated = false;
+        if (navigateToOrigin && !currentPageMatchesOrigin) {
+            await session.page.goto(resolvedOrigin, {waitUntil: "domcontentloaded"});
+            navigated = true;
+        }
+
+        if (reloadPage && (currentPageMatchesOrigin || navigateToOrigin)) {
+            await session.page.reload({waitUntil: "domcontentloaded"});
+            reloaded = true;
+        }
+
+        return {
+            ok: true,
+            origin: resolvedOrigin,
+            key: resolvedKey,
+            currentUrl: session.page?.url?.() || resolvedOrigin,
+            currentPageMatchesOrigin,
+            persistInitScript,
+            usedTemporaryPage,
+            navigated,
+            reloaded
+        };
+    }
+
+    async function seedAuthState({
+        session,
+        origin,
+        storageKey,
+        accessToken,
+        refreshToken,
+        user = null,
+        extra = {},
+        reloadPage = false,
+        navigateToOrigin = false,
+        persistInitScript = true
+    }) {
+        const resolvedStorageKey = String(storageKey || defaultStorageKey || "auth").trim();
+        const resolvedAccessToken = String(accessToken || "").trim();
+        if (!resolvedAccessToken) {
+            throw browserError("INVALID_AUTH_STATE", "seedAuthState requires a non-empty accessToken.");
+        }
+
+        const authState = {
+            accessToken: resolvedAccessToken,
+            refreshToken: refreshToken ?? null,
+            user: user ?? null,
+            ...(extra && typeof extra === "object" ? extra : {})
+        };
+
+        const persisted = await persistLocalStorageValue({
+            session,
+            origin,
+            key: resolvedStorageKey,
+            value: authState,
+            reloadPage,
+            navigateToOrigin,
+            persistInitScript
+        });
+
+        return {
+            ...persisted,
+            storageKey: resolvedStorageKey,
+            authState
+        };
+    }
+
     function getSharedTokens() {
         return sharedAuthSession?.getTokens?.() || null;
     }
 
     function hasValidSharedAuth() {
         return Boolean(getSharedTokens()?.accessToken);
-    }
-
-    async function persistAuthState({session, origin, resolvedStorageKey, authState}) {
-        await session.page.goto(origin, {waitUntil: "domcontentloaded"});
-        await session.context.addInitScript(({key, value}) => {
-            window.localStorage.setItem(key, JSON.stringify(value));
-        }, {key: resolvedStorageKey, value: authState});
-        await session.page.evaluate(({key, value}) => {
-            window.localStorage.setItem(key, JSON.stringify(value));
-        }, {key: resolvedStorageKey, value: authState});
-        await session.page.reload({waitUntil: "domcontentloaded"});
     }
 
     async function authFromApiLogin({session, baseUrl, login, password, useExistingMcpAuth = false, storageKey}) {
@@ -87,10 +194,18 @@ export function createBrowserAuthBridge({sharedAuthSession, fallbackAuthSession,
             user: null
         };
 
-        await persistAuthState({session, origin, resolvedStorageKey, authState});
+        const persisted = await persistLocalStorageValue({
+            session,
+            origin,
+            key: resolvedStorageKey,
+            value: authState,
+            reloadPage: true,
+            navigateToOrigin: true,
+            persistInitScript: true
+        });
 
         return {
-            ok: true,
+            ...persisted,
             authMode,
             origin,
             storageKey: resolvedStorageKey,
@@ -101,7 +216,9 @@ export function createBrowserAuthBridge({sharedAuthSession, fallbackAuthSession,
     }
 
     return {
-        authFromApiLogin
+        authFromApiLogin,
+        persistLocalStorageValue,
+        seedAuthState
     };
 }
 
