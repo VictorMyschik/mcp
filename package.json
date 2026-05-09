@@ -6,6 +6,8 @@
   "main": "index.js",
   "scripts": {
     "check": "find . -name '*.js' -not -path './node_modules/*' -print0 | xargs -0 -n1 node --check",
+    "test": "node --test",
+    "test:internal-translations": "node --test ./tests/internal-translations-auth.test.js",
     "start": "node index.js",
     "smoke:browser": "node ./scripts/browser-smoke.js",
     "smoke:swagger": "node ./scripts/swagger-smoke.js"

@@ -4,10 +4,13 @@ import fetch from "node-fetch";
 import {createAuthSession} from "../services/auth/auth-session.js";
 import {buildRequestUrl, executeHttpRequest} from "../services/swagger/http-executor.js";
 import {collectEndpointSchemaNames, normalizeEndpoint} from "../services/swagger/normalize-endpoint.js";
+import {maskSecret} from "../utils/secret-mask.js";
 import {getErrorMessage} from "../utils/errors.js";
 import {asToolResult} from "./tool-result.js";
 
 const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
+const INTERNAL_TRANSLATIONS_PATH_PREFIX = "/api/v1/internal/translations";
+const INTERNAL_TRANSLATIONS_OPERATION_IDS = new Set(["getInternalTranslations", "mergeInternalTranslations"]);
 const scalarSchema = z.union([z.string(), z.number(), z.boolean()]);
 const headerValueSchema = z.union([scalarSchema, z.array(scalarSchema)]);
 const multipartFieldSchema = z.object({
@@ -243,6 +246,113 @@ function buildOperationPayload(entry) {
     };
 }
 
+function isDebugEnabled(apiConfig) {
+    return Boolean(apiConfig?.debug);
+}
+
+function logSwaggerDebug(apiConfig, message, details = {}) {
+    if (!isDebugEnabled(apiConfig)) {
+        return;
+    }
+
+    console.debug(`[swagger-debug] ${message}`, details);
+}
+
+function normalizeComparablePath(value) {
+    const normalized = String(value || "").trim();
+    if (!normalized) {
+        return "";
+    }
+
+    try {
+        return new URL(normalized).pathname.toLowerCase();
+    } catch {
+        return normalized.toLowerCase();
+    }
+}
+
+function isInternalTranslationsEndpoint({path, operationId, operation} = {}) {
+    const normalizedPath = normalizeComparablePath(path);
+    if (normalizedPath.startsWith(INTERNAL_TRANSLATIONS_PATH_PREFIX)) {
+        return true;
+    }
+
+    const resolvedOperationId = String(operationId || operation?.operationId || "").trim();
+    return INTERNAL_TRANSLATIONS_OPERATION_IDS.has(resolvedOperationId);
+}
+
+function buildMissingInternalTranslationsTokenMessage(internalTranslationsAuth) {
+    const checkedEnvVars = Array.isArray(internalTranslationsAuth?.tokenEnvVarPriority)
+        ? internalTranslationsAuth.tokenEnvVarPriority.join(", ")
+        : "INTERNAL_TRANSLATION_API_TOKEN, INTERNAL_TRANSLATIONS_API_TOKEN, AUTH_TOKEN";
+    return `Missing internal translations token. Configure one of: ${checkedEnvVars}.`;
+}
+
+function createInternalTranslationsAuth(authConfig, apiConfig) {
+    const internalTranslations = authConfig?.internalTranslations || {};
+    const token = String(internalTranslations.token || "").trim();
+    const tokenType = String(internalTranslations.tokenType || authConfig?.defaultTokenType || "Bearer").trim() || "Bearer";
+    const diagnostics = {
+        configured: Boolean(token),
+        tokenEnvVar: internalTranslations.tokenEnvVar || null,
+        tokenSource: internalTranslations.tokenSource || null,
+        tokenType,
+        tokenTypeEnvVar: internalTranslations.tokenTypeEnvVar || null,
+        tokenTypeSource: internalTranslations.tokenTypeSource || null,
+        tokenEnvVarPriority: Array.isArray(internalTranslations.tokenEnvVarPriority)
+            ? [...internalTranslations.tokenEnvVarPriority]
+            : []
+    };
+
+    logSwaggerDebug(
+        apiConfig,
+        token
+            ? "Internal translations token source resolved."
+            : "Internal translations token source not found.",
+        token
+            ? {
+                envVar: diagnostics.tokenEnvVar,
+                source: diagnostics.tokenSource,
+                tokenType,
+                token: maskSecret(token)
+            }
+            : {
+                checkedEnvVars: diagnostics.tokenEnvVarPriority
+            }
+    );
+
+    return {
+        ...diagnostics,
+        hasToken() {
+            return Boolean(token);
+        },
+        buildAuthorizationHeader({path, method, operationId} = {}) {
+            if (!token) {
+                logSwaggerDebug(apiConfig, "Internal translations Authorization header was not formed because token is missing.", {
+                    path: path || null,
+                    method: method ? String(method).toUpperCase() : null,
+                    operationId: operationId || null,
+                    checkedEnvVars: diagnostics.tokenEnvVarPriority
+                });
+                return null;
+            }
+
+            const authorization = `${tokenType} ${token}`.trim();
+            logSwaggerDebug(apiConfig, "Internal translations Authorization header formed.", {
+                path: path || null,
+                method: method ? String(method).toUpperCase() : null,
+                operationId: operationId || null,
+                envVar: diagnostics.tokenEnvVar,
+                source: diagnostics.tokenSource,
+                tokenType,
+                token: maskSecret(token),
+                headerPresent: Boolean(authorization)
+            });
+            return authorization;
+        }
+    };
+}
+
 function resolveEndpointByInput({operationIndex, swagger, operationId, path, method}) {
     if (operationId) {
         return getOperationById(operationIndex, operationId);
@@ -287,6 +397,7 @@ function buildEndpointInspectionPayload({swagger, entry, includeSchemaDefinition
 async function executeOperation({
     swaggerService,
     authSession,
+    internalTranslationsAuth,
     apiConfig,
     fetchImpl,
     path,
@@ -316,18 +427,43 @@ async function executeOperation({
     const swagger = await swaggerService.loadSwagger();
     const baseUrl = baseUrlOverride || resolveBaseUrl({swagger, swaggerUrl: swaggerService.url});
     const requestUrl = buildRequestUrl({baseUrl, path, pathParams, query});
+    const isInternalTranslationsRequest = isInternalTranslationsEndpoint({
+        path,
+        operationId: operation?.operationId,
+        operation
+    });
 
     const swaggerRequiresAuth = Array.isArray(operation.security)
         ? operation.security.length > 0
         : Array.isArray(swagger.security) && swagger.security.length > 0;
-    const requiresAuth = authMode === "required" ? true : swaggerRequiresAuth;
+    const requiresAuth = isInternalTranslationsRequest
+        ? true
+        : authMode === "required"
+            ? true
+            : swaggerRequiresAuth;
 
     async function sendRequest() {
         const requestHeaders = {
             accept: "application/json"
         };
 
-        if (requiresAuth) {
+        if (isInternalTranslationsRequest) {
+            const authorization = internalTranslationsAuth.buildAuthorizationHeader({
+                path,
+                method,
+                operationId: operation?.operationId || null
+            });
+            if (!authorization) {
+                return {
+                    ok: false,
+                    error: {
+                        kind: "internal_translation_auth_error",
+                        message: buildMissingInternalTranslationsTokenMessage(internalTranslationsAuth)
+                    }
+                };
+            }
+            requestHeaders.authorization = authorization;
+        } else if (requiresAuth) {
             if (authMode !== "required") {
                 await authSession.ensureAuthenticated();
             }
@@ -351,7 +487,7 @@ async function executeOperation({
     }
 
     let response = await sendRequest();
-    if (response.error?.status === 401 && requiresAuth && apiConfig.retryOnUnauthorized && authMode !== "required") {
+    if (response.error?.status === 401 && requiresAuth && !isInternalTranslationsRequest && apiConfig.retryOnUnauthorized && authMode !== "required") {
         await authSession.login();
         response = await sendRequest();
     }
@@ -404,6 +540,7 @@ function getOperationById(operationIndex, operationId) {
 async function callApiBySwagger({
     swaggerService,
     authSession,
+    internalTranslationsAuth,
     apiConfig,
     fetchImpl,
     operationIndex,
@@ -418,6 +555,7 @@ async function callApiBySwagger({
     return executeOperation({
         swaggerService,
         authSession,
+        internalTranslationsAuth,
         apiConfig,
         fetchImpl,
         path: entry.path,
@@ -435,6 +573,7 @@ async function callApiBySwagger({
 async function callApiRaw({
     swaggerService,
     authSession,
+    internalTranslationsAuth,
     apiConfig,
     fetchImpl,
     method,
@@ -453,6 +592,23 @@ async function callApiRaw({
     useExistingMcpAuth = false
 }) {
     const requestHeaders = {...(headers || {})};
+    const hasAuthorizationHeader = Object.keys(requestHeaders).some((headerName) => headerName.toLowerCase() === "authorization");
+    const isInternalTranslationsRequest = isInternalTranslationsEndpoint({path, operationId: null})
+        || isInternalTranslationsEndpoint({path: url, operationId: null});
+
+    if (isInternalTranslationsRequest && !hasAuthorizationHeader) {
+        const authorization = internalTranslationsAuth.buildAuthorizationHeader({path: path || url, method});
+        if (!authorization) {
+            return {
+                ok: false,
+                error: {
+                    kind: "internal_translation_auth_error",
+                    message: buildMissingInternalTranslationsTokenMessage(internalTranslationsAuth)
+                }
+            };
+        }
+        requestHeaders.authorization = authorization;
+    }
 
     if (useExistingMcpAuth) {
         const authorizationHeaderName = Object.keys(requestHeaders).find((headerName) => headerName.toLowerCase() === "authorization");
@@ -515,6 +671,7 @@ export async function registerSwaggerTools(server, {
         timeoutMs: apiConfig.requestTimeoutMs,
         buildBaseUrl: () => resolveBaseUrl({swagger, swaggerUrl: swaggerService.url})
     });
+    const internalTranslationsAuth = createInternalTranslationsAuth(authConfig, apiConfig);
 
     async function loadLatestSwagger(forceRefresh = false) {
         return swaggerService.loadSwagger({forceRefresh});
@@ -586,6 +743,7 @@ export async function registerSwaggerTools(server, {
                 const result = await callApiRaw({
                     swaggerService,
                     authSession,
+                    internalTranslationsAuth,
                     apiConfig,
                     fetchImpl,
                     method,
@@ -632,6 +790,7 @@ export async function registerSwaggerTools(server, {
                 const result = await callApiBySwagger({
                     swaggerService,
                     authSession,
+                    internalTranslationsAuth,
                     apiConfig,
                     fetchImpl,
                     operationIndex,
@@ -810,6 +969,7 @@ export async function registerSwaggerTools(server, {
                     const result = await callApiBySwagger({
                         swaggerService,
                         authSession,
+                        internalTranslationsAuth,
                         apiConfig,
                         fetchImpl,
                         operationIndex,
@@ -870,6 +1030,7 @@ export async function registerSwaggerTools(server, {
                     const result = await executeOperation({
                         swaggerService,
                         authSession,
+                        internalTranslationsAuth,
                         apiConfig,
                         fetchImpl,
                         path: entry.path,

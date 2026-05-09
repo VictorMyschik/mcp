@@ -209,9 +209,27 @@ MCP handles:
 - automatic `Authorization` header injection
 - clear unauthorized errors: `Unauthorized: call auth_login first`
 
+### Internal translations auth
+
+Internal translation endpoints are handled separately from regular user/session auth:
+- `GET /api/v1/internal/translations/{locale}/{file}`
+- `POST /api/v1/internal/translations/merge`
+
+For these endpoints MCP injects a dedicated internal bearer token automatically, even when Swagger does not declare `security` for the operation.
+
+Behavior summary:
+- generated tools like `api_get_internal_translations` and `api_merge_internal_translations` use the internal token automatically
+- `call_api_raw` also auto-injects the same token for paths under `/api/v1/internal/translations...` when no explicit `Authorization` header is provided
+- regular endpoints continue using the existing MCP auth session / `auth_login` flow unchanged
+- when `API_DEBUG=true`, MCP logs:
+  - whether an internal token source was found
+  - whether an `Authorization` header was formed
+  - only masked token metadata (`len=<n> sha256=<prefix>`), never the token value itself
+
 ## Environment
 
-- Create `.env` in repository root.
+- Create `.env` and/or `.env.local` in repository root.
+- Env source priority is: `process.env` -> `.env.local` -> `.env`.
 - SQL tools require: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`.
 - Swagger tools require: `SWAGGER_URL`.
 
@@ -228,8 +246,28 @@ Auth/API controls:
 - `AUTH_REFRESH_TOKEN` (optional pre-seeded static refresh token)
 - `AUTH_USERNAME` / `AUTH_PASSWORD` (optional for auto-login)
 - `AUTH_AUTO_LOGIN` (default: `true`)
+- `API_DEBUG` (default: `false`) - enables masked debug logging for auth/header diagnostics
 - `API_REQUEST_TIMEOUT_MS` (default: `15000`)
 - `API_RETRY_ON_UNAUTHORIZED` (default: `true`)
+
+Internal translations token controls:
+- token priority:
+  1. `INTERNAL_TRANSLATION_API_TOKEN`
+  2. `INTERNAL_TRANSLATIONS_API_TOKEN`
+  3. `AUTH_TOKEN` (legacy fallback only)
+- token type priority:
+  1. `INTERNAL_TRANSLATION_API_TOKEN_TYPE`
+  2. `INTERNAL_TRANSLATIONS_API_TOKEN_TYPE`
+  3. `AUTH_DEFAULT_TOKEN_TYPE`
+- default token type is `Bearer`
+
+Recommended configuration:
+
+```bash
+INTERNAL_TRANSLATION_API_TOKEN=your-internal-token
+INTERNAL_TRANSLATION_API_TOKEN_TYPE=Bearer
+API_DEBUG=false
+```
 
 Browser controls:
 - `BROWSER_TOOLS_ENABLED` (default: `true`)

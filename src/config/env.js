@@ -1,4 +1,19 @@
 import path from "node:path";
+import {existsSync, readFileSync} from "node:fs";
+
+import dotenv from "dotenv";
+
+export const ENV_SOURCE_PRIORITY = ["process.env", ".env.local", ".env"];
+export const INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY = [
+    "INTERNAL_TRANSLATION_API_TOKEN",
+    "INTERNAL_TRANSLATIONS_API_TOKEN",
+    "AUTH_TOKEN"
+];
+export const INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY = [
+    "INTERNAL_TRANSLATION_API_TOKEN_TYPE",
+    "INTERNAL_TRANSLATIONS_API_TOKEN_TYPE",
+    "AUTH_DEFAULT_TOKEN_TYPE"
+];
 
 function toPort(value, fallback) {
     const port = Number(value);
@@ -43,10 +58,69 @@ function getMissingEnvVars(keys, env) {
     });
 }
 
-export function getConfigFromEnv(env = process.env) {
+function parseEnvFile(filePath) {
+    if (!existsSync(filePath)) {
+        return {};
+    }
+
+    return dotenv.parse(readFileSync(filePath, "utf8"));
+}
+
+function getFirstNonEmptyEnvValue(env, keys, sourceByKey = {}) {
+    for (const key of keys) {
+        const value = env[key];
+        if (value === undefined || value === null || String(value).trim() === "") {
+            continue;
+        }
+
+        return {
+            key,
+            value: String(value).trim(),
+            source: sourceByKey[key] || null
+        };
+    }
+
+    return {
+        key: null,
+        value: "",
+        source: null
+    };
+}
+
+export function resolveWorkspaceEnv({cwd = process.cwd(), processEnv = process.env} = {}) {
+    const envFile = path.resolve(cwd, ".env");
+    const envLocalFile = path.resolve(cwd, ".env.local");
+    const mergedEnv = {};
+    const sourceByKey = {};
+    const sources = [
+        {name: ".env", values: parseEnvFile(envFile)},
+        {name: ".env.local", values: parseEnvFile(envLocalFile)},
+        {name: "process.env", values: processEnv || {}}
+    ];
+
+    for (const source of sources) {
+        for (const [key, value] of Object.entries(source.values || {})) {
+            if (value === undefined || value === null) {
+                continue;
+            }
+
+            mergedEnv[key] = value;
+            sourceByKey[key] = source.name;
+        }
+    }
+
+    return {
+        env: mergedEnv,
+        sourceByKey
+    };
+}
+
+export function getConfigFromEnv(env = process.env, {sourceByKey = {}} = {}) {
     const sqlMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.sql, env);
     const swaggerMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.swagger, env);
     const browserMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.browser, env);
+    const internalTranslationToken = getFirstNonEmptyEnvValue(env, INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY, sourceByKey);
+    const internalTranslationTokenType = getFirstNonEmptyEnvValue(env, INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY, sourceByKey);
 
     return {
         db: {
@@ -59,7 +133,8 @@ export function getConfigFromEnv(env = process.env) {
         swaggerUrl: env.SWAGGER_URL,
         api: {
             requestTimeoutMs: Math.max(1000, Number(env.API_REQUEST_TIMEOUT_MS || 15000)),
-            retryOnUnauthorized: toBoolean(env.API_RETRY_ON_UNAUTHORIZED, true)
+            retryOnUnauthorized: toBoolean(env.API_RETRY_ON_UNAUTHORIZED, true),
+            debug: toBoolean(env.API_DEBUG, false)
         },
         auth: {
             loginPath: String(env.AUTH_LOGIN_PATH || "/api/v1/login").trim(),
@@ -74,7 +149,17 @@ export function getConfigFromEnv(env = process.env) {
             staticRefreshToken: String(env.AUTH_REFRESH_TOKEN || "").trim(),
             username: String(env.AUTH_USERNAME || "").trim(),
             password: String(env.AUTH_PASSWORD || "").trim(),
-            autoLogin: toBoolean(env.AUTH_AUTO_LOGIN, true)
+            autoLogin: toBoolean(env.AUTH_AUTO_LOGIN, true),
+            internalTranslations: {
+                token: internalTranslationToken.value,
+                tokenEnvVar: internalTranslationToken.key,
+                tokenSource: internalTranslationToken.source,
+                tokenEnvVarPriority: [...INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY],
+                tokenType: String(internalTranslationTokenType.value || env.AUTH_DEFAULT_TOKEN_TYPE || "Bearer").trim() || "Bearer",
+                tokenTypeEnvVar: internalTranslationTokenType.key,
+                tokenTypeSource: internalTranslationTokenType.source,
+                tokenTypeEnvVarPriority: [...INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY]
+            }
         },
         tools: {
             sql: {
@@ -104,5 +189,9 @@ export function getConfigFromEnv(env = process.env) {
     };
 }
 
-export const config = getConfigFromEnv();
+const resolvedWorkspaceEnv = resolveWorkspaceEnv();
+
+export const config = getConfigFromEnv(resolvedWorkspaceEnv.env, {
+    sourceByKey: resolvedWorkspaceEnv.sourceByKey
+});
 
