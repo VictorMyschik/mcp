@@ -3,6 +3,7 @@ import {StdioServerTransport} from "@modelcontextprotocol/sdk/server/stdio.js";
 
 import {config} from "./src/config/env.js";
 import {createDbClient} from "./src/infrastructure/db/client.js";
+import {createConfiguredFetch} from "./src/services/http/configured-fetch.js";
 import {createSwaggerService} from "./src/services/swagger/swagger-cache.js";
 import {registerBrowserTools} from "./src/tools/register-browser-tools.js";
 import {registerHealthTool} from "./src/tools/register-health-tool.js";
@@ -21,6 +22,10 @@ const toolsByGroup = {
     browser: ["browser_open_session", "browser_close_session", "browser_navigate", "browser_auth_from_api_login", "browser_set_local_storage", "browser_seed_auth_state", "browser_open_profile_page", "browser_open_account_home", "browser_open_security_page", "browser_capture_profile_mobile", "browser_wait_for", "browser_click", "browser_fill", "browser_set_input_files", "browser_press", "browser_evaluate", "browser_get_text", "browser_get_attribute", "browser_screenshot", "browser_get_bounding_rect", "browser_get_computed_styles", "browser_assert_layout", "browser_save_storage_state", "browser_load_storage_state", "browser_get_console_logs", "browser_get_network_errors", "browser_inspect_page"]
 };
 
+const fetchImpl = createConfiguredFetch({
+    tlsConfig: config.api.tls
+});
+
 let dbClient = null;
 if (config.tools.sql.enabled) {
     dbClient = createDbClient(config.db);
@@ -34,11 +39,15 @@ let swaggerService = null;
 let sharedAuthSession = null;
 if (config.tools.swagger.enabled) {
     try {
-        swaggerService = createSwaggerService({swaggerUrl: config.swaggerUrl});
+        swaggerService = createSwaggerService({
+            swaggerUrl: config.swaggerUrl,
+            fetchImpl
+        });
         const {registeredToolNames = [], authSession} = await registerSwaggerTools(server, {
             swaggerService,
             authConfig: config.auth,
-            apiConfig: config.api
+            apiConfig: config.api,
+            fetchImpl
         });
         toolsByGroup.swagger = registeredToolNames;
         sharedAuthSession = authSession;
@@ -58,7 +67,8 @@ if (config.tools.browser.enabled) {
             browserConfig: config.browser,
             authConfig: config.auth,
             apiConfig: config.api,
-            sharedAuthSession
+            sharedAuthSession,
+            fetchImpl
         });
         toolsByGroup.browser = registeredToolNames;
     } catch (error) {
@@ -71,6 +81,8 @@ if (config.tools.browser.enabled) {
 registerHealthTool(server, {
     dbClient,
     swaggerService,
+    swaggerAvailability: config.tools.swagger,
+    swaggerUrl: config.swaggerUrl,
     browserAvailability: config.tools.browser,
     browserConfig: config.browser
 });

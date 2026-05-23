@@ -45,6 +45,35 @@ function toBoolean(value, fallback) {
     return fallback;
 }
 
+function getFirstNonEmptyValue(env, keys) {
+    for (const key of keys) {
+        const value = env?.[key];
+        if (value === undefined || value === null || String(value).trim() === "") {
+            continue;
+        }
+
+        return String(value).trim();
+    }
+
+    return "";
+}
+
+function resolveTlsRejectUnauthorized(env) {
+    const explicitRejectUnauthorized = getFirstNonEmptyValue(env, [
+        "API_TLS_REJECT_UNAUTHORIZED",
+        "SWAGGER_TLS_REJECT_UNAUTHORIZED"
+    ]);
+    if (explicitRejectUnauthorized) {
+        return toBoolean(explicitRejectUnauthorized, true);
+    }
+
+    const insecureSkipVerify = getFirstNonEmptyValue(env, [
+        "API_TLS_INSECURE_SKIP_VERIFY",
+        "SWAGGER_TLS_INSECURE_SKIP_VERIFY"
+    ]);
+    return !toBoolean(insecureSkipVerify, false);
+}
+
 const REQUIRED_ENV_BY_TOOL = {
     sql: ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"],
     swagger: ["SWAGGER_URL"],
@@ -134,7 +163,14 @@ export function getConfigFromEnv(env = process.env, {sourceByKey = {}} = {}) {
         api: {
             requestTimeoutMs: Math.max(1000, Number(env.API_REQUEST_TIMEOUT_MS || 15000)),
             retryOnUnauthorized: toBoolean(env.API_RETRY_ON_UNAUTHORIZED, true),
-            debug: toBoolean(env.API_DEBUG, false)
+            debug: toBoolean(env.API_DEBUG, false),
+            tls: {
+                rejectUnauthorized: resolveTlsRejectUnauthorized(env),
+                caCertPath: getFirstNonEmptyValue(env, [
+                    "API_TLS_CA_CERT_PATH",
+                    "SWAGGER_TLS_CA_CERT_PATH"
+                ]) || null
+            }
         },
         auth: {
             loginPath: String(env.AUTH_LOGIN_PATH || "/api/v1/login").trim(),

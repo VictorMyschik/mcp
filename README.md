@@ -249,6 +249,14 @@ Auth/API controls:
 - `API_DEBUG` (default: `false`) - enables masked debug logging for auth/header diagnostics
 - `API_REQUEST_TIMEOUT_MS` (default: `15000`)
 - `API_RETRY_ON_UNAUTHORIZED` (default: `true`)
+- TLS / HTTPS controls for Swagger, auth, and raw API calls:
+  - `API_TLS_REJECT_UNAUTHORIZED` (default: `true`)
+  - `API_TLS_INSECURE_SKIP_VERIFY` (default: `false`, alias fallback when `API_TLS_REJECT_UNAUTHORIZED` is not set)
+  - `API_TLS_CA_CERT_PATH` (optional absolute path to a PEM root/intermediate CA bundle)
+  - backward-compatible aliases are also accepted for Swagger-specific migrations:
+    - `SWAGGER_TLS_REJECT_UNAUTHORIZED`
+    - `SWAGGER_TLS_INSECURE_SKIP_VERIFY`
+    - `SWAGGER_TLS_CA_CERT_PATH`
 
 Internal translations token controls:
 - token priority:
@@ -268,6 +276,22 @@ INTERNAL_TRANSLATION_API_TOKEN=your-internal-token
 INTERNAL_TRANSLATION_API_TOKEN_TYPE=Bearer
 API_DEBUG=false
 ```
+
+For internal/self-signed HTTPS environments, prefer trusting the CA instead of disabling verification:
+
+```bash
+SWAGGER_URL=https://api.outvento.test/docs?api-docs.json
+API_TLS_CA_CERT_PATH=/abs/path/to/root-ca.pem
+```
+
+Temporary diagnostic-only fallback:
+
+```bash
+SWAGGER_URL=https://api.outvento.test/docs?api-docs.json
+API_TLS_INSECURE_SKIP_VERIFY=true
+```
+
+`API_TLS_INSECURE_SKIP_VERIFY=true` should only be used for short-lived local diagnostics when the proper CA chain is not yet available.
 
 Browser controls:
 - `BROWSER_TOOLS_ENABLED` (default: `true`)

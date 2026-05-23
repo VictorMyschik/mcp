@@ -1,7 +1,14 @@
 import {getErrorMessage} from "../utils/errors.js";
 import {asToolResult} from "./tool-result.js";
 
-export function registerHealthTool(server, {dbClient, swaggerService, browserAvailability, browserConfig}) {
+export function registerHealthTool(server, {
+    dbClient,
+    swaggerService,
+    swaggerAvailability,
+    swaggerUrl,
+    browserAvailability,
+    browserConfig
+}) {
     server.registerTool(
         "health",
         {
@@ -13,7 +20,12 @@ export function registerHealthTool(server, {dbClient, swaggerService, browserAva
                 status: "ok",
                 timestamp: new Date().toISOString(),
                 db: {ok: false, enabled: Boolean(dbClient)},
-                swagger: {ok: false, enabled: Boolean(swaggerService), url: swaggerService?.url || null},
+                swagger: {
+                    ok: false,
+                    enabled: swaggerAvailability?.enabled === true,
+                    url: swaggerService?.url || swaggerUrl || null,
+                    runtimeError: swaggerAvailability?.runtimeError || null
+                },
                 browser: {
                     ok: browserAvailability?.enabled === true,
                     enabled: browserAvailability?.enabled === true,
@@ -44,8 +56,14 @@ export function registerHealthTool(server, {dbClient, swaggerService, browserAva
                     health.status = "degraded";
                     health.swagger.error = getErrorMessage(error);
                 }
-            } else {
+            } else if (swaggerAvailability?.runtimeError) {
+                health.status = "degraded";
+                health.swagger.reason = "registration_failed";
+                health.swagger.error = swaggerAvailability.runtimeError;
+            } else if ((swaggerAvailability?.missingEnvVars || []).length > 0) {
                 health.swagger.reason = "disabled_missing_env";
+            } else {
+                health.swagger.reason = "disabled_by_config";
             }
 
             if (browserAvailability?.enabled !== true) {
