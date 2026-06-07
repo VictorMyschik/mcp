@@ -1,4 +1,5 @@
 import {getErrorMessage} from "../utils/errors.js";
+import {getVitourStaticServerState} from "../services/vitour/vitour-static-server.js";
 import {asToolResult} from "./tool-result.js";
 
 export function registerHealthTool(server, {
@@ -7,7 +8,9 @@ export function registerHealthTool(server, {
     swaggerAvailability,
     swaggerUrl,
     browserAvailability,
-    browserConfig
+    browserConfig,
+    vitourAvailability,
+    vitourConfig
 }) {
     server.registerTool(
         "health",
@@ -32,6 +35,15 @@ export function registerHealthTool(server, {
                     artifactsDir: browserConfig?.artifactsDir || null,
                     sessionTtlMs: browserConfig?.sessionTtlMs || null,
                     runtimeError: browserAvailability?.runtimeError || null
+                },
+                vitour: {
+                    ok: vitourAvailability?.enabled === true,
+                    enabled: vitourAvailability?.enabled === true,
+                    root: vitourConfig?.root || null,
+                    baseUrl: vitourConfig?.baseUrl || null,
+                    staticServer: getVitourStaticServerState(),
+                    disabledReason: vitourAvailability?.disabledReason || null,
+                    runtimeError: vitourAvailability?.runtimeError || null
                 }
             };
 
@@ -69,6 +81,15 @@ export function registerHealthTool(server, {
             if (browserAvailability?.enabled !== true) {
                 health.browser.reason = browserAvailability?.runtimeError ? "registration_failed" : "disabled_by_config";
                 if (browserAvailability?.runtimeError) {
+                    health.status = "degraded";
+                }
+            }
+
+            if (vitourAvailability?.enabled !== true) {
+                health.vitour.reason = vitourAvailability?.runtimeError
+                    ? "registration_failed"
+                    : vitourAvailability?.disabledReason || "disabled_by_config";
+                if (vitourAvailability?.runtimeError) {
                     health.status = "degraded";
                 }
             }

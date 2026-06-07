@@ -106,6 +106,31 @@ Interpretation guidelines:
 
 Artifacts are written under `artifacts/browser/<sessionId>/...`.
 
+## Vitour design reference tools
+
+Vitour (`VITOUR_ROOT`, default `~/ide/vitour`) is a static HTML template used for layout reference when building Outvento frontend screens. Vitour is served over HTTP (not `file://`).
+
+Registered Vitour tools:
+- `vitour_list_pages` - catalog of top-level `*.html` pages with Outvento mapping hints
+- `vitour_ensure_server` - start or reuse `python3 -m http.server` for Vitour
+- `vitour_read_snippet` - read HTML snippet from disk (optional CSS selector)
+- `vitour_open_page` - open Playwright session on a Vitour page (requires browser tools)
+- `vitour_inspect_page` - screenshot/styles/diagnostics for a Vitour page (requires browser tools)
+
+Environment:
+- `VITOUR_ROOT` - absolute path to the Vitour template directory
+- `VITOUR_BASE_URL` - default `http://127.0.0.1:8765`
+- `VITOUR_STATIC_HOST` - bind host, default `127.0.0.1`
+- `VITOUR_STATIC_PORT` - default `8765`
+- `VITOUR_TOOLS_ENABLED` - set `false` to disable the Vitour tool group
+
+Typical workflow for news UI:
+1. `vitour_read_snippet` with `page: "blog"` or `page: "blog-details"`
+2. `vitour_inspect_page` with the same page slug for visual verification
+3. Implement Vue pages in `travelfront`, then verify on `http://outvento.test`
+
+See also `vitour/AGENTS.md` in the workspace.
+
 ## Swagger tool behavior
 
 Registered core Swagger tools:
@@ -308,6 +333,65 @@ Browser controls:
 If required variables are missing, corresponding tool groups are not registered.
 `tool_status` is always available.
 
+Swagger generation controls:
+- `SWAGGER_GENERATED_API_TOOLS_ENABLED` (default: `true`) - register one `api_<operationId>` tool per Swagger operation.
+- When `false`, keep meta/auth/call tools only (`call_api_by_swagger`, `call_api_raw`, `inspect_swagger_endpoint`, ...).
+- Use `false` for IDEs with a low MCP tool limit (for example PHPStorm GitHub Copilot: 128 tools).
+
+## Lite profile (PHPStorm / Copilot)
+
+Full registration exposes ~205 tools. Lite mode keeps ~17:
+
+| Group | Lite |
+|-------|------|
+| core | `health`, `tool_status` |
+| sql | `run_sql`, `list_tables` |
+| swagger | meta + auth + `call_api_by_swagger` + `call_api_raw` + 3 wrappers |
+| browser | disabled |
+| vitour | disabled |
+| `api_*` generated | disabled |
+
+Start lite server:
+
+```bash
+npm run start:lite
+```
+
+Equivalent `.env.local` flags (see `.env.lite.example`):
+
+```bash
+SWAGGER_GENERATED_API_TOOLS_ENABLED=false
+BROWSER_TOOLS_ENABLED=false
+VITOUR_TOOLS_ENABLED=false
+```
+
+Reference MCP config for JetBrains: `.ai/mcp/mcp.lite.json` (`outvento-mcp-lite` server name).
+
+Windows PHPStorm global config path:
+
+```text
+C:\Users\Allximik\AppData\Local\github-copilot\intellij\mcp.json
+```
+
+JetBrains Copilot uses root key `servers` (not Cursor's `mcpServers`).
+
+### PHPStorm setup
+
+1. Keep **Cursor** on full MCP: `npm start` (205 tools).
+2. In **PHPStorm**, use lite config at `...\github-copilot\intellij\mcp.json` (see `.ai/mcp/mcp.lite.json`).
+   - Or open via **Settings → Tools → AI Assistant → Model Context Protocol (MCP)**  
+     (or **Settings → Plugins → GitHub Copilot → MCP**, depending on version)
+3. Enable only `outvento-mcp-lite` in PHPStorm. Do not attach the full `outvento-mcp` server there.
+4. **Restart PHPStorm** after editing `mcp.json` (Copilot reloads MCP config on IDE restart).
+4. After start, verify with `tool_status` → expect `registeredTools: "17/17"` (or `19/19` if deterministic wrappers differ).
+5. Call APIs via `call_api_by_swagger` with `operationId` (for example `login`, `profilePage`) instead of `api_login`.
+
+If PHPStorm runs inside WSL natively, replace `wsl.exe ...` with:
+
+```bash
+bash -lc "cd /home/allximik/ide/outvento-mcp && npm run start:lite"
+```
+
 ## Structure
 
 - `index.js` - bootstrap and wiring.
@@ -333,7 +417,8 @@ If required variables are missing, corresponding tool groups are not registered.
 ```bash
 npm install
 npx playwright install chromium
-npm start
+npm start          # full profile (~205 tools, Cursor)
+npm run start:lite # lite profile (~17 tools, PHPStorm Copilot)
 ```
 
 ## Quick check

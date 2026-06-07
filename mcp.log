@@ -1,0 +1,6 @@
+nohup: ignoring input
+
+> mcp@1.0.0 start
+> node index.js
+
+Adaptive mapping: 'get_profile_page' switched to alias operationId 'profilePage' (preferred 'getProfilePage' not found).

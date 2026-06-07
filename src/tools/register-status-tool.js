@@ -12,14 +12,15 @@ export function registerStatusTool(server, {toolAvailability, registeredToolName
             const groups = Object.fromEntries(
                 sortedGroupNames.map((groupName) => {
                     const state = toolAvailability[groupName];
-                    return [
-                        groupName,
-                        {
-                            enabled: state.enabled,
-                            missingEnvVars: [...(state.missingEnvVars || [])].sort(),
-                            runtimeError: state.runtimeError || null
-                        }
-                    ];
+                    const groupState = {
+                        enabled: state.enabled,
+                        missingEnvVars: [...(state.missingEnvVars || [])].sort(),
+                        runtimeError: state.runtimeError || null
+                    };
+                    if (groupName === "swagger" && state.generatedApiToolsEnabled !== undefined) {
+                        groupState.generatedApiToolsEnabled = state.generatedApiToolsEnabled;
+                    }
+                    return [groupName, groupState];
                 })
             );
 
@@ -55,10 +56,18 @@ export function registerStatusTool(server, {toolAvailability, registeredToolName
             const registeredCount = Object.values(sortedTools).filter((state) => state.registered).length;
             const totalCount = Object.keys(sortedTools).length;
 
+            const profile = groups.swagger?.generatedApiToolsEnabled === false
+                || groups.browser?.enabled === false
+                || groups.vitour?.enabled === false
+                ? "lite"
+                : "full";
+
             return asToolResult({
                 status: "ok",
                 timestamp: new Date().toISOString(),
+                profile,
                 registeredTools: `${registeredCount}/${totalCount}`,
+                activeTools: registeredCount,
                 groups,
                 tools: sortedTools
             });

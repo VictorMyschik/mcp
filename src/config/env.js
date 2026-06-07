@@ -3,6 +3,8 @@ import {existsSync, readFileSync} from "node:fs";
 
 import dotenv from "dotenv";
 
+import {parseVitourBaseUrl, resolveVitourRoot} from "../services/vitour/vitour-paths.js";
+
 export const ENV_SOURCE_PRIORITY = ["process.env", ".env.local", ".env"];
 export const INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY = [
     "INTERNAL_TRANSLATION_API_TOKEN",
@@ -77,7 +79,8 @@ function resolveTlsRejectUnauthorized(env) {
 const REQUIRED_ENV_BY_TOOL = {
     sql: ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"],
     swagger: ["SWAGGER_URL"],
-    browser: []
+    browser: [],
+    vitour: []
 };
 
 function getMissingEnvVars(keys, env) {
@@ -144,10 +147,17 @@ export function resolveWorkspaceEnv({cwd = process.cwd(), processEnv = process.e
     };
 }
 
-export function getConfigFromEnv(env = process.env, {sourceByKey = {}} = {}) {
+export function getConfigFromEnv(env = process.env, {sourceByKey = {}, cwd = process.cwd()} = {}) {
     const sqlMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.sql, env);
     const swaggerMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.swagger, env);
     const browserMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.browser, env);
+    const vitourMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.vitour, env);
+    const vitourRoot = resolveVitourRoot(env, {cwd});
+    const vitourPort = toPort(env.VITOUR_STATIC_PORT, 8765);
+    const vitourHost = String(env.VITOUR_STATIC_HOST || "127.0.0.1").trim() || "127.0.0.1";
+    const vitourBaseUrl = String(env.VITOUR_BASE_URL || `http://${vitourHost}:${vitourPort}`).trim();
+    const parsedVitourBaseUrl = parseVitourBaseUrl(vitourBaseUrl);
+    const vitourToolsExplicitlyDisabled = toBoolean(env.VITOUR_TOOLS_ENABLED, true) === false;
     const internalTranslationToken = getFirstNonEmptyEnvValue(env, INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY, sourceByKey);
     const internalTranslationTokenType = getFirstNonEmptyEnvValue(env, INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY, sourceByKey);
 
@@ -204,12 +214,28 @@ export function getConfigFromEnv(env = process.env, {sourceByKey = {}} = {}) {
             },
             swagger: {
                 enabled: swaggerMissingVars.length === 0,
-                missingEnvVars: swaggerMissingVars
+                missingEnvVars: swaggerMissingVars,
+                generatedApiToolsEnabled: toBoolean(env.SWAGGER_GENERATED_API_TOOLS_ENABLED, true)
             },
             browser: {
                 enabled: browserMissingVars.length === 0 && toBoolean(env.BROWSER_TOOLS_ENABLED, true),
                 missingEnvVars: browserMissingVars
+            },
+            vitour: {
+                enabled: Boolean(vitourRoot) && !vitourToolsExplicitlyDisabled && vitourMissingVars.length === 0,
+                missingEnvVars: vitourMissingVars,
+                disabledReason: !vitourRoot
+                    ? "vitour_root_not_found"
+                    : vitourToolsExplicitlyDisabled
+                        ? "disabled_by_config"
+                        : null
             }
+        },
+        vitour: {
+            root: vitourRoot,
+            host: parsedVitourBaseUrl.host,
+            port: parsedVitourBaseUrl.port,
+            baseUrl: parsedVitourBaseUrl.baseUrl
         },
         browser: {
             headlessDefault: toBoolean(env.BROWSER_HEADLESS_DEFAULT, true),

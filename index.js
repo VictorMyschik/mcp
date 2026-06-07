@@ -10,6 +10,7 @@ import {registerHealthTool} from "./src/tools/register-health-tool.js";
 import {registerStatusTool} from "./src/tools/register-status-tool.js";
 import {registerSqlTools} from "./src/tools/register-sql-tools.js";
 import {registerSwaggerTools} from "./src/tools/register-swagger-tools.js";
+import {registerVitourTools} from "./src/tools/register-vitour-tools.js";
 
 const server = new McpServer({
     name: "unified-mcp",
@@ -19,7 +20,8 @@ const server = new McpServer({
 const toolsByGroup = {
     sql: ["run_sql", "list_tables"],
     swagger: ["list_api_endpoints", "get_endpoint", "inspect_swagger_endpoint", "get_schema", "find_endpoint_by_keyword", "call_api_raw", "call_api_by_swagger", "auth_login", "auth_logout", "auth_status", "get_profile_page", "get_translations", "update_profile"],
-    browser: ["browser_open_session", "browser_close_session", "browser_navigate", "browser_auth_from_api_login", "browser_set_local_storage", "browser_seed_auth_state", "browser_open_profile_page", "browser_open_account_home", "browser_open_security_page", "browser_capture_profile_mobile", "browser_wait_for", "browser_click", "browser_fill", "browser_set_input_files", "browser_press", "browser_evaluate", "browser_get_text", "browser_get_attribute", "browser_screenshot", "browser_get_bounding_rect", "browser_get_computed_styles", "browser_assert_layout", "browser_save_storage_state", "browser_load_storage_state", "browser_get_console_logs", "browser_get_network_errors", "browser_inspect_page"]
+    browser: ["browser_open_session", "browser_close_session", "browser_navigate", "browser_auth_from_api_login", "browser_set_local_storage", "browser_seed_auth_state", "browser_open_profile_page", "browser_open_account_home", "browser_open_security_page", "browser_capture_profile_mobile", "browser_wait_for", "browser_click", "browser_fill", "browser_set_input_files", "browser_press", "browser_evaluate", "browser_get_text", "browser_get_attribute", "browser_screenshot", "browser_get_bounding_rect", "browser_get_computed_styles", "browser_assert_layout", "browser_save_storage_state", "browser_load_storage_state", "browser_get_console_logs", "browser_get_network_errors", "browser_inspect_page"],
+    vitour: ["vitour_list_pages", "vitour_ensure_server", "vitour_read_snippet", "vitour_open_page", "vitour_inspect_page"]
 };
 
 const fetchImpl = createConfiguredFetch({
@@ -37,6 +39,7 @@ if (config.tools.sql.enabled) {
 
 let swaggerService = null;
 let sharedAuthSession = null;
+let browserWorkflows = null;
 if (config.tools.swagger.enabled) {
     try {
         swaggerService = createSwaggerService({
@@ -47,6 +50,7 @@ if (config.tools.swagger.enabled) {
             swaggerService,
             authConfig: config.auth,
             apiConfig: config.api,
+            generatedApiToolsEnabled: config.tools.swagger.generatedApiToolsEnabled,
             fetchImpl
         });
         toolsByGroup.swagger = registeredToolNames;
@@ -63,19 +67,45 @@ if (config.tools.swagger.enabled) {
 
 if (config.tools.browser.enabled) {
     try {
-        const {registeredToolNames = []} = await registerBrowserTools(server, {
+        const {registeredToolNames = [], browserWorkflows: workflows = null} = await registerBrowserTools(server, {
             browserConfig: config.browser,
             authConfig: config.auth,
             apiConfig: config.api,
             sharedAuthSession,
-            fetchImpl
+            fetchImpl,
+            swaggerUrl: config.swaggerUrl
         });
         toolsByGroup.browser = registeredToolNames;
+        browserWorkflows = workflows;
     } catch (error) {
         config.tools.browser.enabled = false;
         config.tools.browser.runtimeError = error instanceof Error ? error.message : String(error);
         console.warn(`Browser tools failed to register: ${config.tools.browser.runtimeError}`);
     }
+}
+
+if (config.tools.vitour.enabled) {
+    try {
+        const {registeredToolNames = []} = registerVitourTools(server, {
+            vitourConfig: config.vitour,
+            browserWorkflows,
+            fetchImpl
+        });
+        toolsByGroup.vitour = registeredToolNames;
+    } catch (error) {
+        config.tools.vitour.enabled = false;
+        config.tools.vitour.runtimeError = error instanceof Error ? error.message : String(error);
+        console.warn(`Vitour tools failed to register: ${config.tools.vitour.runtimeError}`);
+    }
+} else {
+    toolsByGroup.vitour = [];
+    console.warn(
+        `Vitour tools disabled. reason=${config.tools.vitour.disabledReason || "unknown"} missing=${config.tools.vitour.missingEnvVars.join(", ")}`
+    );
+}
+
+if (!config.tools.browser.enabled) {
+    toolsByGroup.browser = [];
 }
 
 registerHealthTool(server, {
@@ -84,7 +114,9 @@ registerHealthTool(server, {
     swaggerAvailability: config.tools.swagger,
     swaggerUrl: config.swaggerUrl,
     browserAvailability: config.tools.browser,
-    browserConfig: config.browser
+    browserConfig: config.browser,
+    vitourAvailability: config.tools.vitour,
+    vitourConfig: config.vitour
 });
 registerStatusTool(server, {
     toolAvailability: config.tools,

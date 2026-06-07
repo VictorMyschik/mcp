@@ -58,6 +58,13 @@ const DETERMINISTIC_TOOL_SPECS = {
     }
 };
 
+// Cursor combines server name and tool name with ":" and enforces a 60-char limit.
+// With server name "outvento-mcp" (13 chars including ":"), tool names must be <= 47 chars.
+// Map auto-generated tool names that exceed this limit to shorter, semantically equivalent aliases.
+const TOOL_NAME_OVERRIDES = {
+    api_import_selected_external_cloud_provider_media: "api_import_selected_cloud_media"
+};
+
 function resolveBaseUrl({swagger, swaggerUrl}) {
     const serverUrl = String(swagger?.servers?.[0]?.url ?? "").trim();
     if (serverUrl) {
@@ -650,6 +657,7 @@ export async function registerSwaggerTools(server, {
     authConfig,
     apiConfig,
     authSession: providedAuthSession,
+    generatedApiToolsEnabled = true,
     fetchImpl = fetch
 }) {
     const swagger = await swaggerService.loadSwagger();
@@ -997,12 +1005,24 @@ export async function registerSwaggerTools(server, {
         );
     }
 
+    if (generatedApiToolsEnabled !== true) {
+        return {
+            registeredToolNames: registeredTools,
+            authSession,
+            diagnostics: {
+                adaptiveMappingWarnings,
+                generatedApiToolsEnabled: false
+            }
+        };
+    }
+
     const generatedOperationIds = [...operationIndex.keys()].sort((left, right) => left.localeCompare(right));
     const toolNameToOperationId = new Map();
 
     for (const operationId of generatedOperationIds) {
         const entry = operationIndex.get(operationId);
-        const toolName = `api_${normalizeOperationId(operationId)}`;
+        const defaultToolName = `api_${normalizeOperationId(operationId)}`;
+        const toolName = TOOL_NAME_OVERRIDES[defaultToolName] || defaultToolName;
 
         if (toolNameToOperationId.has(toolName)) {
             throw new Error(
@@ -1076,7 +1096,8 @@ export async function registerSwaggerTools(server, {
         registeredToolNames: registeredTools,
         authSession,
         diagnostics: {
-            adaptiveMappingWarnings
+            adaptiveMappingWarnings,
+            generatedApiToolsEnabled: true
         }
     };
 }

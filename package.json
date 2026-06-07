@@ -9,6 +9,7 @@
     "test": "node --test",
     "test:internal-translations": "node --test ./tests/internal-translations-auth.test.js",
     "start": "node index.js",
+    "start:lite": "SWAGGER_GENERATED_API_TOOLS_ENABLED=false BROWSER_TOOLS_ENABLED=false VITOUR_TOOLS_ENABLED=false node index.js",
     "smoke:browser": "node ./scripts/browser-smoke.js",
     "smoke:swagger": "node ./scripts/swagger-smoke.js"
   },

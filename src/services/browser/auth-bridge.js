@@ -1,5 +1,6 @@
 import {getErrorMessage} from "../../utils/errors.js";
 import {browserError} from "./browser-errors.js";
+import {resolveApiBaseUrl} from "./resolve-api-base-url.js";
 
 function resolveOrigin(baseUrl) {
     try {
@@ -9,7 +10,7 @@ function resolveOrigin(baseUrl) {
     }
 }
 
-export function createBrowserAuthBridge({sharedAuthSession, fallbackAuthSession, defaultStorageKey}) {
+export function createBrowserAuthBridge({sharedAuthSession, fallbackAuthSession, defaultStorageKey, swaggerUrl}) {
     async function writeLocalStorageValue({page, key, value}) {
         await page.evaluate(({storageKey, storageValue}) => {
             window.localStorage.setItem(storageKey, JSON.stringify(storageValue));
@@ -158,7 +159,12 @@ export function createBrowserAuthBridge({sharedAuthSession, fallbackAuthSession,
             authMode = "existing-mcp-auth";
         } else {
             try {
-                await authSession.login({login, password, baseUrlOverride: origin});
+                const apiBaseUrl = resolveApiBaseUrl({frontendOrigin: origin, swaggerUrl});
+                await authSession.login({
+                    login,
+                    password,
+                    ...(apiBaseUrl ? {baseUrlOverride: apiBaseUrl} : {}),
+                });
                 tokens = authSession.getTokens();
             } catch (error) {
                 if (hasSharedAuth) {

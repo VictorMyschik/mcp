@@ -125,7 +125,8 @@ export async function registerBrowserTools(server, {
     authConfig,
     apiConfig,
     sharedAuthSession,
-    fetchImpl = fetch
+    fetchImpl = fetch,
+    swaggerUrl = null
 }) {
     const artifactService = createArtifactService({rootDir: browserConfig.artifactsDir});
     await artifactService.ensureRootDir();
@@ -142,7 +143,8 @@ export async function registerBrowserTools(server, {
     const authBridge = createBrowserAuthBridge({
         sharedAuthSession,
         fallbackAuthSession: localAuthSession,
-        defaultStorageKey: browserConfig.frontendAuthStorageKey
+        defaultStorageKey: browserConfig.frontendAuthStorageKey,
+        swaggerUrl
     });
     const playwrightService = createPlaywrightService();
 
@@ -1161,6 +1163,10 @@ export async function registerBrowserTools(server, {
 
     return {
         registeredToolNames,
+        browserWorkflows: {
+            runPageOpenWorkflow,
+            runInspectWorkflow
+        },
         diagnostics: {
             supportedDevices: sessionManager.supportedDevices,
             artifactsDir: browserConfig.artifactsDir,
