@@ -3,17 +3,17 @@ import {existsSync, readFileSync} from "node:fs";
 
 import dotenv from "dotenv";
 
+import {resolveMonitoringPaths} from "../services/monitoring/latency-report-service.js";
+import {resolveOutventoRoot} from "../services/monitoring/resolve-outvento-root.js";
 import {parseVitourBaseUrl, resolveVitourRoot} from "../services/vitour/vitour-paths.js";
 
 export const ENV_SOURCE_PRIORITY = ["process.env", ".env.local", ".env"];
-export const INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY = [
-    "INTERNAL_TRANSLATION_API_TOKEN",
-    "INTERNAL_TRANSLATIONS_API_TOKEN",
+export const INTERNAL_API_TOKEN_ENV_PRIORITY = [
+    "INTERNAL_API_TOKEN",
     "AUTH_TOKEN"
 ];
-export const INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY = [
-    "INTERNAL_TRANSLATION_API_TOKEN_TYPE",
-    "INTERNAL_TRANSLATIONS_API_TOKEN_TYPE",
+export const INTERNAL_API_TOKEN_TYPE_ENV_PRIORITY = [
+    "INTERNAL_API_TOKEN_TYPE",
     "AUTH_DEFAULT_TOKEN_TYPE"
 ];
 
@@ -80,7 +80,9 @@ const REQUIRED_ENV_BY_TOOL = {
     sql: ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME"],
     swagger: ["SWAGGER_URL"],
     browser: [],
-    vitour: []
+    vitour: [],
+    monitoring: [],
+    qa: []
 };
 
 function getMissingEnvVars(keys, env) {
@@ -152,14 +154,20 @@ export function getConfigFromEnv(env = process.env, {sourceByKey = {}, cwd = pro
     const swaggerMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.swagger, env);
     const browserMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.browser, env);
     const vitourMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.vitour, env);
+    const monitoringMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.monitoring, env);
+    const qaMissingVars = getMissingEnvVars(REQUIRED_ENV_BY_TOOL.qa, env);
+    const outventoRoot = resolveOutventoRoot(env, {cwd});
+    const monitoringPaths = resolveMonitoringPaths(env);
+    const monitoringExplicitlyDisabled = toBoolean(env.MONITORING_TOOLS_ENABLED, true) === false;
+    const monitoringReady = Boolean(outventoRoot) && existsSync(monitoringPaths.sshKeyPath);
     const vitourRoot = resolveVitourRoot(env, {cwd});
     const vitourPort = toPort(env.VITOUR_STATIC_PORT, 8765);
     const vitourHost = String(env.VITOUR_STATIC_HOST || "127.0.0.1").trim() || "127.0.0.1";
     const vitourBaseUrl = String(env.VITOUR_BASE_URL || `http://${vitourHost}:${vitourPort}`).trim();
     const parsedVitourBaseUrl = parseVitourBaseUrl(vitourBaseUrl);
     const vitourToolsExplicitlyDisabled = toBoolean(env.VITOUR_TOOLS_ENABLED, true) === false;
-    const internalTranslationToken = getFirstNonEmptyEnvValue(env, INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY, sourceByKey);
-    const internalTranslationTokenType = getFirstNonEmptyEnvValue(env, INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY, sourceByKey);
+    const internalTranslationToken = getFirstNonEmptyEnvValue(env, INTERNAL_API_TOKEN_ENV_PRIORITY, sourceByKey);
+    const internalTranslationTokenType = getFirstNonEmptyEnvValue(env, INTERNAL_API_TOKEN_TYPE_ENV_PRIORITY, sourceByKey);
 
     return {
         db: {
@@ -200,11 +208,11 @@ export function getConfigFromEnv(env = process.env, {sourceByKey = {}, cwd = pro
                 token: internalTranslationToken.value,
                 tokenEnvVar: internalTranslationToken.key,
                 tokenSource: internalTranslationToken.source,
-                tokenEnvVarPriority: [...INTERNAL_TRANSLATION_TOKEN_ENV_PRIORITY],
+                tokenEnvVarPriority: [...INTERNAL_API_TOKEN_ENV_PRIORITY],
                 tokenType: String(internalTranslationTokenType.value || env.AUTH_DEFAULT_TOKEN_TYPE || "Bearer").trim() || "Bearer",
                 tokenTypeEnvVar: internalTranslationTokenType.key,
                 tokenTypeSource: internalTranslationTokenType.source,
-                tokenTypeEnvVarPriority: [...INTERNAL_TRANSLATION_TOKEN_TYPE_ENV_PRIORITY]
+                tokenTypeEnvVarPriority: [...INTERNAL_API_TOKEN_TYPE_ENV_PRIORITY]
             }
         },
         tools: {
@@ -229,7 +237,28 @@ export function getConfigFromEnv(env = process.env, {sourceByKey = {}, cwd = pro
                     : vitourToolsExplicitlyDisabled
                         ? "disabled_by_config"
                         : null
+            },
+            monitoring: {
+                enabled: monitoringReady && !monitoringExplicitlyDisabled && monitoringMissingVars.length === 0,
+                missingEnvVars: monitoringMissingVars,
+                disabledReason: monitoringExplicitlyDisabled
+                    ? "disabled_by_config"
+                    : !outventoRoot
+                        ? "outvento_root_not_found"
+                        : !existsSync(monitoringPaths.sshKeyPath)
+                            ? "ssh_key_not_found"
+                            : null
+            },
+            qa: {
+                enabled: qaMissingVars.length === 0 && toBoolean(env.QA_TOOLS_ENABLED, true),
+                missingEnvVars: qaMissingVars
             }
+        },
+        monitoring: {
+            outventoRoot,
+            sshHost: monitoringPaths.sshHost,
+            sshUser: monitoringPaths.sshUser,
+            sshKeyPath: monitoringPaths.sshKeyPath
         },
         vitour: {
             root: vitourRoot,

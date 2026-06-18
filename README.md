@@ -86,6 +86,8 @@ Recommended input file descriptor shapes:
 - `{ "name": "avatar.txt", "mimeType": "text/plain", "text": "hello" }`
 - `{ "name": "avatar.png", "mimeType": "image/png", "base64": "..." }`
 
+When the page clears `<input type="file">` inside its `@change` handler (common in Vue upload flows), the tool may return `inputClearedAfterAttach: true` and fall back to the requested file metadata for `appliedFiles` / `fileCount` instead of reporting a false `0`.
+
 ### Browser diagnostics
 
 Browser diagnostics are intentionally split to reduce noise:
@@ -105,6 +107,23 @@ Interpretation guidelines:
 - filtered noise should not hide real app errors: only known Vite/dev chatter and harmless aborted requests are ignored
 
 Artifacts are written under `artifacts/browser/<sessionId>/...`.
+
+## QA helper tools
+
+Registered QA tools (for browser/API end-to-end checks):
+- `qa_get_verification_code` - latest registration verification code by email (requires PostgreSQL)
+- `qa_list_recent_users` - list recent users by email prefix (requires PostgreSQL)
+- `qa_prepare_fixture_image` - create a local JPEG in `artifacts/qa/` for `browser_set_input_files`
+- `browser_scan_i18n_leaks` - scan visible page text and `document.title` for untranslated i18n keys
+
+Typical registration QA flow:
+1. `browser_open_session` + `/register`
+2. submit form in browser
+3. `qa_get_verification_code` with the test email
+4. fill OTP in browser
+5. `browser_scan_i18n_leaks` on public/account pages
+
+SQL/Swagger registration now retries startup connections (use `DB_HOST=127.0.0.1` on WSL if `localhost` fails).
 
 ## Vitour design reference tools
 
@@ -130,6 +149,37 @@ Typical workflow for news UI:
 3. Implement Vue pages in `travelfront`, then verify on `http://outvento.test`
 
 See also `vitour/AGENTS.md` in the workspace.
+
+## Monitoring / latency report
+
+Remote nginx latency report (same `rt=` metric as Grafana dashboard **Outvento Response Time**).
+
+Registered monitoring tools:
+- `monitoring_latency_report` - JSON report with avg/p50/p95/max and slowest requests for dev/prod API nginx
+
+Implementation runs `outvento/scripts/latency_report.sh` over SSH (read-only: parses Docker nginx access logs).
+
+Environment:
+- `OUTVENTO_ROOT` - path to `outvento` repo (auto-detected as sibling `../outvento` when present)
+- `MONITORING_SSH_HOST` - default `167.86.76.119`
+- `MONITORING_SSH_USER` - default `outvento`
+- `MONITORING_SSH_KEY` - default `~/.ssh/outvento_server`
+- `MONITORING_TOOLS_ENABLED` - set `false` to disable
+
+Tool parameters:
+- `environment` - `dev`, `prod`, or `all` (default `all`)
+- `since` - docker logs window, e.g. `1h`, `30m`, `24h`
+- `filter` - `human` (exclude bots/scanners), `api` (`/api/v1/` only), or `all`
+- `topN` - number of slowest requests (default `15`)
+
+Fallback without MCP:
+
+```bash
+cd outvento && make latency-report
+cd outvento && ENV=dev SINCE=1h make latency-report
+```
+
+Available in **full and lite** profiles when `OUTVENTO_ROOT` + SSH key exist.
 
 ## Swagger tool behavior
 
@@ -283,22 +333,20 @@ Auth/API controls:
     - `SWAGGER_TLS_INSECURE_SKIP_VERIFY`
     - `SWAGGER_TLS_CA_CERT_PATH`
 
-Internal translations token controls:
+Internal API token controls (`/api/v1/internal/translations`, `/api/v1/internal/news`, …):
 - token priority:
-  1. `INTERNAL_TRANSLATION_API_TOKEN`
-  2. `INTERNAL_TRANSLATIONS_API_TOKEN`
-  3. `AUTH_TOKEN` (legacy fallback only)
+  1. `INTERNAL_API_TOKEN`
+  2. `AUTH_TOKEN` (legacy fallback only)
 - token type priority:
-  1. `INTERNAL_TRANSLATION_API_TOKEN_TYPE`
-  2. `INTERNAL_TRANSLATIONS_API_TOKEN_TYPE`
-  3. `AUTH_DEFAULT_TOKEN_TYPE`
+  1. `INTERNAL_API_TOKEN_TYPE`
+  2. `AUTH_DEFAULT_TOKEN_TYPE`
 - default token type is `Bearer`
 
 Recommended configuration:
 
 ```bash
-INTERNAL_TRANSLATION_API_TOKEN=your-internal-token
-INTERNAL_TRANSLATION_API_TOKEN_TYPE=Bearer
+INTERNAL_API_TOKEN=your-internal-token
+INTERNAL_API_TOKEN_TYPE=Bearer
 API_DEBUG=false
 ```
 
@@ -340,13 +388,14 @@ Swagger generation controls:
 
 ## Lite profile (PHPStorm / Copilot)
 
-Full registration exposes ~205 tools. Lite mode keeps ~17:
+Full registration exposes ~206 tools. Lite mode keeps ~18:
 
 | Group | Lite |
 |-------|------|
 | core | `health`, `tool_status` |
 | sql | `run_sql`, `list_tables` |
 | swagger | meta + auth + `call_api_by_swagger` + `call_api_raw` + 3 wrappers |
+| monitoring | `monitoring_latency_report` (when SSH key + `outvento` repo found) |
 | browser | disabled |
 | vitour | disabled |
 | `api_*` generated | disabled |
@@ -377,7 +426,7 @@ JetBrains Copilot uses root key `servers` (not Cursor's `mcpServers`).
 
 ### PHPStorm setup
 
-1. Keep **Cursor** on full MCP: `npm start` (205 tools).
+1. Keep **Cursor** on full MCP: `npm start` (206 tools).
 2. In **PHPStorm**, use lite config at `...\github-copilot\intellij\mcp.json` (see `.ai/mcp/mcp.lite.json`).
    - Or open via **Settings → Tools → AI Assistant → Model Context Protocol (MCP)**  
      (or **Settings → Plugins → GitHub Copilot → MCP**, depending on version)

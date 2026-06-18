@@ -296,23 +296,23 @@ test("resolveWorkspaceEnv applies .env < .env.local < process.env priority", asy
 
     try {
         await writeFile(path.join(tempDir, ".env"), [
-            "INTERNAL_TRANSLATION_API_TOKEN=from-dotenv",
+            "INTERNAL_API_TOKEN=from-dotenv",
             "AUTH_TOKEN=legacy-dotenv"
         ].join("\n"), "utf8");
         await writeFile(path.join(tempDir, ".env.local"), [
-            "INTERNAL_TRANSLATION_API_TOKEN=from-dotenv-local"
+            "INTERNAL_API_TOKEN=from-dotenv-local"
         ].join("\n"), "utf8");
 
         const resolved = resolveWorkspaceEnv({
             cwd: tempDir,
             processEnv: {
                 SWAGGER_URL: "http://localhost/swagger.json",
-                INTERNAL_TRANSLATION_API_TOKEN: "from-process-env"
+                INTERNAL_API_TOKEN: "from-process-env"
             }
         });
 
-        assert.equal(resolved.env.INTERNAL_TRANSLATION_API_TOKEN, "from-process-env");
-        assert.equal(resolved.sourceByKey.INTERNAL_TRANSLATION_API_TOKEN, ENV_SOURCE_PRIORITY[0]);
+        assert.equal(resolved.env.INTERNAL_API_TOKEN, "from-process-env");
+        assert.equal(resolved.sourceByKey.INTERNAL_API_TOKEN, ENV_SOURCE_PRIORITY[0]);
     } finally {
         await rm(tempDir, {recursive: true, force: true});
     }
@@ -322,16 +322,16 @@ test("getConfigFromEnv prefers dedicated internal translation token over AUTH_TO
     const config = getConfigFromEnv({
         SWAGGER_URL: "http://localhost/swagger.json",
         AUTH_TOKEN: "legacy-auth-token",
-        INTERNAL_TRANSLATION_API_TOKEN: "dedicated-internal-token"
+        INTERNAL_API_TOKEN: "dedicated-internal-token"
     }, {
         sourceByKey: {
             AUTH_TOKEN: "process.env",
-            INTERNAL_TRANSLATION_API_TOKEN: ".env.local"
+            INTERNAL_API_TOKEN: ".env.local"
         }
     });
 
     assert.equal(config.auth.internalTranslations.token, "dedicated-internal-token");
-    assert.equal(config.auth.internalTranslations.tokenEnvVar, "INTERNAL_TRANSLATION_API_TOKEN");
+    assert.equal(config.auth.internalTranslations.tokenEnvVar, "INTERNAL_API_TOKEN");
     assert.equal(config.auth.internalTranslations.tokenSource, ".env.local");
 });
 
@@ -345,7 +345,7 @@ test("internal translations tools succeed with a valid configured token and emit
 
     try {
         sandbox = await createRegisteredSwaggerTools({
-            INTERNAL_TRANSLATION_API_TOKEN: VALID_INTERNAL_TOKEN,
+            INTERNAL_API_TOKEN: VALID_INTERNAL_TOKEN,
             API_DEBUG: "true"
         });
 
@@ -418,7 +418,7 @@ test("internal translations tools fail clearly when token is missing", async () 
 
 test("internal translations tools propagate 403 for an invalid configured token", async () => {
     const sandbox = await createRegisteredSwaggerTools({
-        INTERNAL_TRANSLATION_API_TOKEN: "internal-token-invalid"
+        INTERNAL_API_TOKEN: "internal-token-invalid"
     });
 
     try {

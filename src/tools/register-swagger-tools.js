@@ -58,12 +58,31 @@ const DETERMINISTIC_TOOL_SPECS = {
     }
 };
 
-// Cursor combines server name and tool name with ":" and enforces a 60-char limit.
-// With server name "outvento-mcp" (13 chars including ":"), tool names must be <= 47 chars.
+const MCP_SERVER_NAME = "outvento-mcp";
+const MCP_COMBINED_NAME_LIMIT = 60;
+const MCP_SERVER_PREFIX_LENGTH = MCP_SERVER_NAME.length + 1;
+const MCP_MAX_TOOL_NAME_LENGTH = MCP_COMBINED_NAME_LIMIT - MCP_SERVER_PREFIX_LENGTH;
+
+// Cursor combines server name and tool name and enforces a 60-char limit.
+// With server name "outvento-mcp" (13 chars including separator), tool names must be <= 47 chars.
 // Map auto-generated tool names that exceed this limit to shorter, semantically equivalent aliases.
 const TOOL_NAME_OVERRIDES = {
-    api_import_selected_external_cloud_provider_media: "api_import_selected_cloud_media"
+    api_import_selected_external_cloud_provider_media: "api_import_selected_cloud_media",
+    api_download_conversation_message_attachments_zip: "api_download_conv_msg_attach_zip"
 };
+
+export function resolveGeneratedApiToolName(operationId) {
+    const defaultToolName = `api_${normalizeOperationId(operationId)}`;
+    return TOOL_NAME_OVERRIDES[defaultToolName] || defaultToolName;
+}
+
+export function getGeneratedApiToolNameLimit() {
+    return {
+        serverName: MCP_SERVER_NAME,
+        combinedNameLimit: MCP_COMBINED_NAME_LIMIT,
+        maxToolNameLength: MCP_MAX_TOOL_NAME_LENGTH
+    };
+}
 
 function resolveBaseUrl({swagger, swaggerUrl}) {
     const serverUrl = String(swagger?.servers?.[0]?.url ?? "").trim();
@@ -291,7 +310,7 @@ function isInternalTranslationsEndpoint({path, operationId, operation} = {}) {
 function buildMissingInternalTranslationsTokenMessage(internalTranslationsAuth) {
     const checkedEnvVars = Array.isArray(internalTranslationsAuth?.tokenEnvVarPriority)
         ? internalTranslationsAuth.tokenEnvVarPriority.join(", ")
-        : "INTERNAL_TRANSLATION_API_TOKEN, INTERNAL_TRANSLATIONS_API_TOKEN, AUTH_TOKEN";
+        : "INTERNAL_API_TOKEN, AUTH_TOKEN";
     return `Missing internal translations token. Configure one of: ${checkedEnvVars}.`;
 }
 
@@ -1022,7 +1041,7 @@ export async function registerSwaggerTools(server, {
     for (const operationId of generatedOperationIds) {
         const entry = operationIndex.get(operationId);
         const defaultToolName = `api_${normalizeOperationId(operationId)}`;
-        const toolName = TOOL_NAME_OVERRIDES[defaultToolName] || defaultToolName;
+        const toolName = resolveGeneratedApiToolName(operationId);
 
         if (toolNameToOperationId.has(toolName)) {
             throw new Error(

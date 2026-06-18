@@ -529,14 +529,27 @@ export function createPlaywrightService() {
             }))
         }));
 
+        const payloadFileSummaries = normalizedFiles.map((file) => ({
+            name: file.name,
+            size: file.buffer?.length ?? file.size ?? 0,
+            type: file.mimeType || "application/octet-stream",
+            lastModified: Date.now()
+        }));
+
+        // Vue/React upload handlers often read files then clear input.value in @change,
+        // so element.files may already be empty even though attachment succeeded.
+        const appliedFiles = inputState.files.length > 0 ? inputState.files : payloadFileSummaries;
+        const inputClearedAfterAttach = inputState.files.length === 0 && payloadFileSummaries.length > 0;
+
         return {
             ok: true,
             selector,
             url: session.page.url(),
-            fileCount: inputState.files.length,
+            fileCount: appliedFiles.length,
             isMultiple: inputState.isMultiple,
             requestedFiles: normalizedFiles.map(toInputFileSummary),
-            appliedFiles: inputState.files
+            appliedFiles,
+            inputClearedAfterAttach
         };
     }
 

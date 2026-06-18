@@ -507,6 +507,7 @@ export async function registerBrowserTools(server, {
         "browser_load_storage_state",
         "browser_get_console_logs",
         "browser_get_network_errors",
+        "browser_scan_i18n_leaks",
         "browser_inspect_page"
     ];
 
@@ -1108,6 +1109,83 @@ export async function registerBrowserTools(server, {
             takeElementScreenshot: takeElementScreenshot ?? true,
             styleProperties
         })
+    );
+
+    server.registerTool(
+        "browser_scan_i18n_leaks",
+        {
+            description: "Scan visible page text and document.title for untranslated i18n keys (e.g. page_profile.public_profile.fallback.birthday).",
+            inputSchema: {
+                sessionId: z.string().min(1),
+                maxResults: z.number().int().positive().max(100).optional()
+            }
+        },
+        wrapTool(async ({sessionId, maxResults}) => {
+            const session = sessionManager.getSession(sessionId);
+            const limit = maxResults ?? 50;
+
+            return playwrightService.evaluate({
+                session,
+                expression: `(() => {
+                    const keyPattern = /^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]+){2,}$/i;
+                    const inlineKeyPattern = /\\b(?:page_[a-z0-9_]+(?:\\.[a-z0-9_]+)+|(?:common|account)\\.[a-z0-9_.]+)\\b/gi;
+                    const leaks = [];
+                    const seen = new Set();
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        const text = node.textContent?.trim();
+                        if (!text || !keyPattern.test(text) || seen.has(text)) {
+                            continue;
+                        }
+
+                        const element = node.parentElement;
+                        if (!element || ["SCRIPT", "STYLE", "NOSCRIPT"].includes(element.tagName)) {
+                            continue;
+                        }
+
+                        seen.add(text);
+                        const className = typeof element.className === "string"
+                            ? element.className.trim().split(/\\s+/).filter(Boolean)[0]
+                            : "";
+                        leaks.push({
+                            text,
+                            source: "body",
+                            tag: element.tagName.toLowerCase(),
+                            selector: element.id
+                                ? "#" + element.id
+                                : className
+                                    ? "." + className
+                                    : element.tagName.toLowerCase()
+                        });
+                    }
+
+                    const documentTitle = document.title?.trim() || "";
+                    for (const match of documentTitle.match(inlineKeyPattern) || []) {
+                        const text = match.trim();
+                        if (!text || seen.has(text)) {
+                            continue;
+                        }
+
+                        seen.add(text);
+                        leaks.push({
+                            text,
+                            source: "document.title",
+                            tag: "title",
+                            selector: "document.title"
+                        });
+                    }
+
+                    return {
+                        url: window.location.href,
+                        documentTitle,
+                        count: leaks.length,
+                        leaks: leaks.slice(0, ${limit})
+                    };
+                })()`
+            });
+        }, {debugLabel: "browser-scan-i18n-error"})
     );
 
     server.registerTool(
